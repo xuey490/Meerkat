@@ -5,11 +5,10 @@
 
   <img  src="https://www.phpframe.org/logo.png" width="600" alt="Logo">
 
-
+  “meerkat”在中文中通常翻译为猫鼬或狐獴，属于獴科的一种小型食肉哺乳动物，原产于非洲南部,它们喜欢群居生活，跟小伙伴在一起的时候，总有一个专职“站岗放哨”的哨兵，发现危险后，通过不同频率组合的叫声传递超过20种信息，精准指示天敌类型(如鹰隼、狐狸)和方位，让其它小伙伴及时警觉危险。Meerkat服务器集群实时监控平台的寓意也是像狐獴一样，及早发现服务器的状态异常，及时预警。
 </div>
 
- “Meerkat”在中文中通常翻译为猫鼬或狐獴，属于獴科的一种小型食肉哺乳动物，原产于非洲南部,它们喜欢群居生活，跟小伙伴在一起的时候，总有一个专职“站岗放哨”的哨兵，发现危险后，通过不同频率组合的叫声传递超过20种信息，精准指示天敌类型(如鹰隼、狐狸)和方位，让其它小伙伴及时警觉危险。Meerkat服务器集群实时监控平台的寓意也是像狐獴一样，及早发现服务器的状态异常，及时预警。
-  
+
 面向内网服务器集群的统一监控：被监控机采集指标，中心机汇聚、存储与展示。**指标不经 Telegraf 直写 InfluxDB**，经 **monitor-agent** 用 **mTLS gRPC** 上报到 **Collector**。
 
 本仓库是**源码 + 本机开发运行包**的合集（多个 Go module），**未使用 Docker**。第三方组件用系统安装包或工作区已解压的二进制；Windows / Linux 均提供一键脚本（见 [§8](#8-一键脚本总览)）。
@@ -47,7 +46,7 @@
 | 角色 | 源码目录 | 典型产物 / 运行目录 |
 | --- | --- | --- |
 | 采集器 | `Telegraf/` | `Telegraf/telegraf.exe` 或系统 `telegraf` |
-| Agent | `client/` | `Monitor/monitor-agent.exe` 或 `dist/linux-*/monitor-agent` |
+| Agent | `client/` | `client/monitor-agent.exe` 或 `dist/linux-*/monitor-agent` |
 | Collector | `server/` | `server/collector.exe` 或 `dist/linux-*/collector` |
 | Web API | `webserver/` | `webserver/webserver.exe` 或 `dist/linux-*/webserver` |
 | 控制台 | `web/` | 开发 `pnpm dev`（:3000）；生产 `web/dist` + Nginx |
@@ -200,7 +199,7 @@ $env:CGO_ENABLED = "0"
 
 Set-Location "$root\client"
 go test ./...
-go build -trimpath -ldflags "-s -w" -o "$root\Monitor\monitor-agent.exe" .\cmd\monitor-agent
+go build -trimpath -ldflags "-s -w" -o "$root\client\monitor-agent.exe" .\cmd\monitor-agent
 
 Set-Location "$root\server"
 go build -trimpath -ldflags "-s -w" -o "$root\server\collector.exe" .\cmd\collector
@@ -224,7 +223,14 @@ cd "$ROOT/webserver" && go build -trimpath -ldflags "-s -w" -o "$ROOT/dist/linux
 
 本机为 **arm64** 时，把输出目录改为 `dist/linux-arm64`（或在 arm64 机器上直接编译到该目录）。
 
-`./scripts/setup-linux.sh` 默认编译到 `dist/linux-amd64/`。
+`./scripts/setup-linux.sh` 从 [go.dev](https://go.dev/dl/) 安装 **Go 1.27.1** 到 `/usr/local/go`（不用 apt 的旧版 `golang-go`），按本机架构编译到 `dist/linux-amd64/` 或 `dist/linux-arm64/`。环境变量写入 `scripts/linux/monitor.env` 与 `/etc/monitor/monitor.env`，执行前：
+
+```bash
+set -a && source /etc/monitor/monitor.env && set +a
+# 或 source /path/to/monitor/scripts/linux/monitor.env
+```
+
+可选 `GO_VERSION=1.27.1`、`GO_INSTALL_DIR=/usr/local/go`。Go 的 `PATH` 会写入 `/etc/profile.d/monitor-go.sh`，并在 `/etc/bash.bashrc` 中 `source`（login 与面板终端均可用）。业务变量见 `/etc/monitor/monitor.env`；可选 `MONITOR_ENV_AUTO=1` 在登录时一并加载（`/etc/profile.d/monitor-env.sh`）。示例见 `scripts/linux/monitor.env.example`。
 
 ### 6.3 交叉编译（在 Windows 上出 Linux 包）
 
@@ -282,7 +288,7 @@ Influx 首次初始化：浏览器打开 `http://<中心>:8086`，**org=`hkc`**�
 
 | 文件 | 改什么 |
 | --- | --- |
-| `Monitor/config/agent.yaml`（或 `/etc/monitor-agent/agent.yaml`） | **`agent_id` 全局唯一**；`server_address` 为中心 `IP:9500`；`ca_file` / `cert_file` / `key_file` |
+| `client/configs/agent.yaml`（或 `/etc/monitor-agent/agent.yaml`） | **`agent_id` 全局唯一**；`server_address` 为中心 `IP:9500`；`ca_file` / `cert_file` / `key_file` |
 | `Telegraf/telegraf.conf` | 输出 URL 保持 `http://127.0.0.1:9510/v1/telegraf/metrics`；标签环境变量与 Agent 一致 |
 | 证书 | 各机复制同一套 **`ca.pem` + `client.pem` + `client-key.pem`**（测试环境共用一张 client 证即可） |
 
@@ -320,8 +326,8 @@ sudo install -Dm600 ca.pem client.pem client-key.pem /etc/monitor-agent/certs/
 | `scripts/windows/server/stop.ps1` | Windows | 停前端 :3000、collector、webserver、Influx；`-Infra` 另停 PostgreSQL |
 | `scripts/windows/agent/start.ps1` | Windows | monitor-agent + Telegraf（可见控制台） |
 | `scripts/windows/agent/stop.ps1` | Windows | telegraf + monitor-agent |
-| `scripts/cert/Generate-mTLSCerts.ps1` | Windows | 默认 Go certgen → `Monitor/certs` |
-| `scripts/setup-linux.sh` | Linux | apt 装 PG/Influx/Telegraf（可跳过）、编译到 `dist/linux-amd64`；**不启动 InfluxDB** |
+| `scripts/cert/Generate-mTLSCerts.ps1` | Windows | 默认 Go certgen → `client/certs` |
+| `scripts/setup-linux.sh` | Linux | 安装 **Go 1.27.1**、写 `monitor.env`、apt 装 PG/Influx/Telegraf（可跳过）、编译到 `dist/linux-*`；**不启动 InfluxDB** |
 | `scripts/linux/server/start.sh` | Linux | PG、Influx、Collector、webserver；**不启动** `pnpm dev` |
 | `scripts/linux/server/stop.sh` | Linux | 停中心进程；`INFRA=1` 停 PostgreSQL |
 | `scripts/linux/agent/start.sh` | Linux | agent + telegraf |
@@ -372,7 +378,7 @@ chmod +x scripts/setup-linux.sh scripts/linux/**/*.sh
 # 可选：SKIP_INSTALL=1 ./scripts/setup-linux.sh
 ```
 
-`setup-linux.sh` 会尝试拉起 PostgreSQL（若已装但未监听），**不会**启动 InfluxDB；Influx 由下一节的 `server/start.sh` 负责。
+`setup-linux.sh` 会尝试拉起 PostgreSQL（若已装但未监听），**不会**启动 InfluxDB；Influx 由下一节的 `server/start.sh` 负责。Go 的 PATH 安装后对新终端自动生效；当前 shell 可 `source /etc/profile.d/monitor-go.sh`。启服务前再 `source /etc/monitor/monitor.env` 以加载 `MONITOR_ROOT`、`MONITOR_INFLUX_TOKEN` 等。
 
 ### 10.2 启动 / 停止
 
@@ -443,7 +449,7 @@ pgrep -a influxd; pgrep -a collector; pgrep -a webserver; pgrep -a monitor-agent
 # 中心
 Invoke-WebRequest http://127.0.0.1:8086/health -UseBasicParsing
 Invoke-WebRequest http://127.0.0.1:8090/healthz -UseBasicParsing   # code 00000
-curl.exe --ssl-no-revoke --cacert .\Monitor\certs\ca.pem https://localhost:8080/healthz
+curl.exe --ssl-no-revoke --cacert .\client\certs\ca.pem https://localhost:8080/healthz
 
 # Agent
 Invoke-WebRequest http://127.0.0.1:9511/healthz -UseBasicParsing
@@ -475,7 +481,7 @@ powershell -File .\scripts\cert\Generate-mTLSCerts.ps1
 
 ```powershell
 cd client
-go run .\cmd\certgen -out ..\Monitor\certs
+go run .\cmd\certgen -out ..\client\certs
 ```
 
 | 文件 | 用途 |
@@ -492,7 +498,7 @@ go run .\cmd\certgen -out ..\Monitor\certs
 
 | 文件 | 用途 |
 | --- | --- |
-| `Monitor/config/agent.yaml` | 本机 Windows Agent |
+| `client/configs/agent.yaml` | 本机 Windows Agent |
 | `client/configs/agent.example.yaml` | Linux 模板 |
 | `client/configs/agent.windows.yaml` | Windows 模板 |
 | `server/configs/server.local.yaml` | Collector 本机配置 |
