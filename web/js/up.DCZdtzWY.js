@@ -1,0 +1,1 @@
+var e=`data:image/svg+xml,%3csvg%20width='15'%20height='15'%20aria-label='向上键'%20role='img'%3e%3cg%20fill='none'%20stroke='currentColor'%20stroke-linecap='round'%20stroke-linejoin='round'%20stroke-width='1.2'%3e%3cpath%20d='M7.5%2011.5v-8M10.5%206.5l-3-3-3%203'%3e%3c/path%3e%3c/g%3e%3c/svg%3e`;export{e as default};

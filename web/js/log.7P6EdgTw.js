@@ -1,0 +1,1 @@
+import{l as e}from"./stores.4ZAKrQhk.js";var t=`/api/v1/logs`,n={getPage(n){return e({url:`${t}`,method:`get`,params:n})},getVisitTrend(n){return e({url:`${t}/analytics/trend`,method:`get`,params:n})},getVisitOverview(){return e({url:`${t}/analytics/overview`,method:`get`})}};export{n as t};

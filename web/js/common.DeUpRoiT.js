@@ -1,0 +1,1 @@
+var e=function(e){return e.CREATE=`create`,e.EDIT=`edit`,e.VIEW=`view`,e}({}),t=function(e){return e[e.DISABLED=0]=`DISABLED`,e[e.ENABLED=1]=`ENABLED`,e}({});export{e as n,t};
