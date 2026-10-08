@@ -13,6 +13,8 @@
 Agent端一旦部署在客户机上，主动采集指标，向中心机汇聚、存储与展示，几分钟后就可以在web dashboard看到各项指标。
 **指标不经 Telegraf 直写 InfluxDB**，经 **monitor-agent** 用 **mTLS gRPC** 上报到 **Collector**。
 
+### 演示网址：https://monitor.phpframe.org/   商业部署联系作者微信：xdbyvibm6 （注明来意）
+
 已完成的功能：
 - [x]内置ssh控制台，可以用户名连接，密钥连接;
 - [x]sftp模块，管理服务器文件上传，下载，删除，重命名;
@@ -32,7 +34,7 @@ Agent端一旦部署在客户机上，主动采集指标，向中心机汇聚、
 
 本仓库是**源码 + 本机开发运行包**的合集（多个 Go module），**未使用 Docker**。第三方组件用系统安装包或工作区已解压的二进制；Windows / Linux 均提供一键脚本（见 [§8](#8-一键脚本总览)）。
 
-### 演示网址：https://monitor.phpframe.org/   商业部署联系作者微信：xdbyvibm6 （注明来意）
+
 
 ---
 
