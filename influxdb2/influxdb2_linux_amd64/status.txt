@@ -1,0 +1,31 @@
+`start.sh` 用 `nohup` 拉起 `/usr/bin/influxd`，日志在 **`/tmp/influxd.monitor.log`**。以前只 `sleep 2`，进程还没听 8086 就会报 DOWN。
+
+**立刻看：**
+
+```bash
+# 脚本这次启动的日志（优先看）
+tail -n 100 /tmp/influxd.monitor.log
+
+# 进程和端口
+pgrep -a influxd
+ss -lnt | grep 8086
+curl -s http://127.0.0.1:8086/health
+
+# 若是 apt/systemd 装的 Influx
+systemctl status influxdb --no-pager -l
+systemctl status influxdb2 --no-pager -l
+journalctl -u influxdb -u influxdb2 -n 80 --no-pager
+```
+
+手动前台跑一次，错误会直接打在终端：
+
+```bash
+# 先停掉残留
+pkill influxd || true
+sleep 1
+/usr/bin/influxd
+```
+
+常见原因：bolt 锁（已经有一个 `influxd` 或 systemd 占着数据目录）、权限、`/root/.influxdbv2` 和 `/var/lib/influxdb2` 两套数据目录打架。日志里出现 `bolt`、`unable to open`、`address already in use` 就能对上。
+
+把 `tail -n 100 /tmp/influxd.monitor.log` 的输出贴过来，可以继续往下看。

@@ -1,0 +1,14 @@
+enabled: false
+server_addr: 127.0.0.1
+server_port: 8848
+namespace_id: ""
+group: DEFAULT_GROUP
+data_id: xiaolanshu.yaml
+username: ""
+password: ""
+timeout_ms: 5000
+log_dir: logs/nacos
+cache_dir: data/nacos/cache
+log_level: info
+fail_fast: false
+watch: false

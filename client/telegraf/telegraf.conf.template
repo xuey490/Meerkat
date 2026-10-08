@@ -1,0 +1,68 @@
+[agent]
+  interval = "10s"
+  round_interval = false
+  flush_interval = "10s"
+  collection_jitter = "2s"
+  flush_jitter = "2s"
+  metric_batch_size = 500
+  metric_buffer_limit = 5000
+  buffer_strategy = "disk"
+  buffer_directory = "/var/lib/telegraf/buffer/${AGENT_ID}"
+  buffer_disk_sync = false
+  skip_processors_after_aggregators = false
+
+[global_tags]
+  agent_id = "${AGENT_ID}"
+  environment = "${ENVIRONMENT}"
+  site = "${SITE}"
+  role = "${ROLE}"
+
+[[inputs.cpu]]
+  percpu = false
+  totalcpu = true
+
+[[inputs.mem]]
+[[inputs.swap]]
+[[inputs.load]]
+[[inputs.system]]
+
+[[inputs.disk]]
+  interval = "30s"
+  ignore_fs = ["tmpfs", "devtmpfs", "overlay", "squashfs"]
+
+[[inputs.diskio]]
+  interval = "30s"
+[[inputs.net]]
+[[inputs.processes]]
+  interval = "30s"
+[[inputs.internal]]
+
+# Enable only on approved Docker hosts with a read-only socket mount.
+#[[inputs.docker]]
+#
+# Database inputs run every 30 seconds. Supply complete connection strings
+# through environment variables or Telegraf's secret store.
+[[inputs.mysql]]
+  interval = "30s"
+  servers = ["${MONITOR_MYSQL_DSN}"]
+  metric_version = 2
+
+[[inputs.redis]]
+  interval = "30s"
+  servers = ["${MONITOR_REDIS_URL}"]
+
+[[inputs.postgresql]]
+  interval = "30s"
+  address = "${MONITOR_POSTGRES_ADDRESS}"
+  prepared_statements = true
+
+#[[inputs.rabbitmq]]
+
+[[outputs.http]]
+  url = "http://127.0.0.1:9510/v1/telegraf/metrics"
+  method = "POST"
+  data_format = "influx"
+  content_encoding = "gzip"
+  timeout = "5s"
+  [outputs.http.headers]
+    Content-Type = "text/plain; charset=utf-8"

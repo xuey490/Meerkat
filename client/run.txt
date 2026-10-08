@@ -1,0 +1,16 @@
+启动命令（在包根目录执行；一键脚本会按自身位置上溯三层自动定位）：
+
+& ".\client\monitor-agent.exe" --config ".\client\configs\agent.yaml"
+
+Invoke-WebRequest `
+  -UseBasicParsing `
+  -Uri "http://127.0.0.1:9510/v1/telegraf/metrics" `
+  -Method POST `
+  -ContentType "text/plain" `
+  -Body "test,agent_id=test value=1"
+
+$env:MONITOR_ROOT = (Get-Location).Path
+Invoke-Expression (Get-Content -LiteralPath '.\Telegraf\run.txt' -Raw)
+
+$env:MONITOR_INFLUX_TOKEN = "<write-token>"
+& ".\server\collector.exe" -config ".\server\configs\server.local.yaml"

@@ -1,0 +1,171 @@
+username:fssadmin
+password:chen2026!@#
+organization name: hkc
+bucket name: bucket
+token: pErJZiXxp_KpEOfWJvmUYlMCDRrGOYUc7Ipm6FAzFxhvOXLwgXH3ewXFvTNDH4R8yydoWJAkZLXO1p5jxcsIxQ==
+
+/root/.influxdbv2/configs
+
+
+curl -s -X POST http://127.0.0.1:8086/api/v2/setup \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "username": "admin",
+    "password": "chenyelin001!@#",
+    "org": "hkc",
+    "bucket": "bucket",
+    "retentionPeriodSeconds": 0
+  }'
+
+
+你在 Linux 上跑完 `setup-linux.sh` 之后，InfluxDB 2 需要**单独启动**并完成**首次初始化**，才能拿到 write token 给 Collector / webserver 用。按下面做即可。
+
+## 1. 启动 InfluxDB 2
+
+在仓库根目录（例如 `/www/wwwroot/monitor.phpframe.org`）：
+
+**方式 A（推荐，和项目脚本一致）**
+
+```bash
+cd /www/wwwroot/monitor.phpframe.org
+chmod +x scripts/linux/server/start.sh
+./scripts/linux/server/start.sh
+```
+
+会顺带起 PostgreSQL、Collector、webserver；若你**只想先起 Influx**，用方式 B。
+
+**方式 B（仅 Influx，apt 安装时常见）**
+
+```bash
+sudo systemctl start influxdb    # 或 influxdb2，视 unit 名而定
+sudo systemctl enable influxdb # 开机自启（可选）
+sudo systemctl status influxdb
+```
+
+**方式 C（手动前台/后台，排障用）**
+
+```bash
+nohup influxd >/tmp/influxd.monitor.log 2>&1 &
+sleep 2
+curl -sS http://127.0.0.1:8086/health
+```
+
+看到 `pass` 或 HTTP 200 即表示进程在监听 **8086**。
+
+```bash
+ss -lnt | grep 8086
+pgrep -a influxd
+```
+
+---
+
+## 2. 首次初始化并拿到 Token
+
+只有**第一次**装在这台机、数据目录还是空的，才会出现「初始化」向导。
+
+### 网页（最直观）
+
+1. 本机浏览器：`http://127.0.0.1:8086`  
+   远程服务器：先开防火墙/安全组 **8086**，或 SSH 隧道：  
+   `ssh -L 8086:127.0.0.1:8086 root@你的服务器`  
+   再在本机打开 `http://localhost:8086`
+2. 按向导设置：
+   - 管理员用户名 / 密码（自己记好）
+   - **Organization：`hkc`**（与项目配置一致）
+   - **Initial Bucket：`bucket`**
+3. 完成后页面会给出 **Initial Admin Token**（一长串），复制保存。  
+   若向导里没再显示，登录后在：**Data → API Tokens** 新建 token，权限至少能 **写 `bucket`**（或 All Access 仅开发环境）。
+
+### 命令行（无浏览器时）
+
+需已安装 `influx` CLI（`apt install influxdb2` 通常会带）：
+
+```bash
+influx setup \
+  --username admin \
+  --password '请改成强密码' \
+  --org hkc \
+  --bucket bucket \
+  --retention 0 \
+  --force
+```
+
+成功时终端会打印 **token**，只显示一次，务必保存。
+
+若提示已初始化过，不要用 `setup --force` 乱覆盖，改为：
+
+```bash
+influx auth list   # 需先 influx config 登录，或在 UI 里新建 token
+```
+
+---
+
+## 3. 把 Token 写给 Monitor
+
+项目默认 org/bucket 为 **`hkc` / `bucket`**，与 `server/configs/server.local.example.yaml` 一致。
+
+任选一种（生产建议环境变量，yaml 勿提交 git）：
+
+**A. 环境变量（与 setup 生成的文件一致）**
+
+```bash
+sudo nano /etc/monitor/monitor.env
+```
+
+取消注释并填写：
+
+```bash
+export MONITOR_INFLUX_TOKEN="这里粘贴你的 write token"
+```
+
+然后：
+
+```bash
+set -a && source /etc/monitor/monitor.env && set +a
+```
+
+**B. Collector 配置**
+
+编辑 `server/configs/server.local.yaml`（没有则从 `server.local.example.yaml` 复制）：
+
+```yaml
+influx:
+  url: "http://localhost:8086"
+  token: "你的 token"
+  organization: "hkc"
+  bucket: "bucket"
+```
+
+webserver 若也读 Influx，同样可通过 `MONITOR_INFLUX_TOKEN` 覆盖（见 `webserver/README.md`）。
+
+---
+
+## 4. 再启中心服务
+
+Token 写好之后：
+
+```bash
+cd /www/wwwroot/monitor.phpframe.org
+# 若 Influx 已在跑，start.sh 会跳过 8086
+./scripts/linux/server/stop.sh   # 需要干净重启时
+./scripts/linux/server/start.sh
+```
+
+验证 token 是否有效（需本机已 `influx` 且配置好，或看 Collector 日志）：
+
+```bash
+curl -sS http://127.0.0.1:8086/health
+curl -sS http://127.0.0.1:8090/healthz
+```
+
+---
+
+## 常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| `8086` 已监听但 Collector 报 unauthorized | 多半是旧实例或 token 不对；停掉所有 `influxd` 后只用一种方式启动，并用**当前实例**里创建的 token |
+| 访问不了 8086 | 云厂商安全组 + `ufw`；生产建议只监听 `127.0.0.1`，用 SSH 隧道做首次初始化 |
+| org/bucket 填错 | 与 yaml 不一致会导致写入失败；建议按 **`hkc` / `bucket`** 初始化，或改 yaml 与 Influx 里一致 |
+
+如果你说一下当前是 `systemctl start influxdb` 还是 `start.sh`、以及 `curl http://127.0.0.1:8086/health` 的输出，我可以帮你判断是「还没初始化」还是「已经初始化只需在 UI 里抄 token」。

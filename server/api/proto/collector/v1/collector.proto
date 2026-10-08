@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package monitor.collector.v1;
+
+option go_package = "monitor-server/api/proto/collector/v1;collectorv1";
+
+service CollectorService {
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+message AgentMessage {
+  oneof payload {
+    Register register = 1;
+    Heartbeat heartbeat = 2;
+    MetricBatch metrics = 3;
+    AgentEvent event = 4;
+  }
+}
+
+message Register {
+  string agent_id = 1;
+  string boot_id = 2;
+  string hostname = 3;
+  string ip_address = 4;
+  string os = 5;
+  string architecture = 6;
+  string agent_version = 7;
+  string telegraf_version = 8;
+  string config_version = 9;
+  map<string, string> labels = 10;
+}
+
+message Heartbeat {
+  string agent_id = 1;
+  string boot_id = 2;
+  uint64 sequence = 3;
+  int64 sent_at_unix_nano = 4;
+  string telegraf_state = 5;
+  string telegraf_version = 6;
+  int64 telegraf_last_metric_unix_nano = 7;
+  uint64 queue_bytes = 8;
+  uint64 dropped_metric_batches = 9;
+  bool telegraf_running = 10;
+  uint32 telegraf_pid = 11;
+  int64 agent_started_at_unix_nano = 12;
+  uint64 agent_memory_bytes = 13;
+  uint64 agent_goroutines = 14;
+  uint64 queue_capacity_bytes = 15;
+  double queue_usage_percent = 16;
+  string queue_alert_level = 17;
+  string os_version = 18;
+  int64 system_time_unix_nano = 19;
+  uint64 memory_total_bytes = 20;
+  uint64 memory_used_bytes = 21;
+  uint64 process_count = 22;
+  uint64 listening_port_count = 23;
+  double load1 = 24;
+  uint64 system_uptime_seconds = 25;
+  string cpu_model = 26;
+  uint64 physical_cpu_cores = 27;
+  uint64 logical_cpu_cores = 28;
+  double hardware_temperature_c = 29;
+  repeated ProcessInfo processes = 30;
+  repeated TemperatureReading temperatures = 31;
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  string name = 2;
+  uint64 memory_bytes = 3;
+}
+
+message TemperatureReading {
+  string name = 1;
+  double celsius = 2;
+}
+
+message MetricBatch {
+  string agent_id = 1;
+  string boot_id = 2;
+  uint64 sequence = 3;
+  int64 collected_at_unix_nano = 4;
+  bytes gzip_line_protocol = 5;
+}
+
+message AgentEvent {
+  string agent_id = 1;
+  string boot_id = 2;
+  string event_type = 3;
+  string details_json = 4;
+}
+
+message ServerMessage {
+  string config_version = 1;
+  uint64 backlog_max_bytes_per_second = 2;
+  uint32 backlog_max_batches = 3;
+  uint64 backlog_max_parallel = 4;
+  string command = 5;
+}

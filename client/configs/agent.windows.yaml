@@ -1,0 +1,33 @@
+# Windows monitor-agent configuration.
+# agent_id is written once on first start. server_address and certificate paths still need this host.
+# Leave labels.environment, site, or role empty to get test / local / windows.
+agent_id: "replace-with-stable-ulid"
+agent_version: "1.0.0"
+config_version: "local-1"
+labels:
+  environment: production
+  site: "replace-site"
+  role: "replace-role"
+listen_address: "127.0.0.1:9510"
+server_address: "monitor.company.example:443"
+insecure_tls: false
+# Paths are relative to the process working directory (package root, set by the start scripts);
+# client binary/certs/state live under client/.
+ca_file: "client/certs/ca.pem"
+cert_file: "client/certs/client.pem"
+key_file: "client/certs/client-key.pem"
+state_directory: "client/state"
+heartbeat_interval: 5s
+reconnect_max: 30s
+max_spool_bytes: 1073741824
+max_spool_age: 24h
+max_backlog_batches: 10
+max_backlog_parallel: 1
+backlog_rate_bytes_per_second: 1048576
+retry_base: 1s
+retry_max: 5m
+health_address: "127.0.0.1:9511"
+telegraf_binary: "Telegraf/telegraf.exe"
+telegraf_service: "telegraf"
+telegraf_check_interval: 5s
+auto_recover_telegraf: true

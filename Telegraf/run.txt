@@ -1,0 +1,129 @@
+if (-not $env:MONITOR_ROOT) {
+  if (Test-Path -LiteralPath (Join-Path (Get-Location) "Telegraf\telegraf.exe")) {
+    $env:MONITOR_ROOT = (Get-Location).Path
+  } elseif (Test-Path -LiteralPath (Join-Path (Get-Location) "telegraf.exe")) {
+    $env:MONITOR_ROOT = (Resolve-Path (Join-Path (Get-Location) "..")).Path
+  } else {
+    throw "MONITOR_ROOT is unset. Run scripts\\windows\\agent\\start.ps1 or cd to the package root."
+  }
+}
+$Root = $env:MONITOR_ROOT
+# TOML double-quoted paths treat \U as a unicode escape. Keep the env value slash-safe.
+$env:MONITOR_ROOT = $Root.Replace('\', '/')
+
+function Test-PlaceholderAgentId([string]$Id) {
+  $Id = if ($null -eq $Id) { "" } else { $Id.Trim() }
+  return ($Id -eq "" -or $Id -eq "replace-with-stable-ulid" -or $Id -eq "local-windows-002" -or $Id -eq "local-linux-001")
+}
+function Read-AgentIdentity([string]$Path) {
+  $result = @{ agent_id = ""; environment = ""; site = ""; role = "" }
+  if (-not (Test-Path -LiteralPath $Path)) { return $result }
+  $inLabels = $false
+  foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
+    $trim = $line.Trim()
+    if ($trim -eq "" -or $trim.StartsWith("#")) { continue }
+    if ($line -match '^agent_id:\s*"?([^"#]+)"?\s*$') {
+      $result.agent_id = $Matches[1].Trim()
+      $inLabels = $false
+      continue
+    }
+    if ($line -match '^labels:\s*$') { $inLabels = $true; continue }
+    if ($inLabels -and $line -match '^  (environment|site|role):\s*"?([^"#]*)"?\s*$') {
+      $result[$Matches[1]] = $Matches[2].Trim()
+      continue
+    }
+    if ($inLabels -and $line -match '^\S') { $inLabels = $false }
+  }
+  return $result
+}
+$agentYaml = Join-Path $Root "client\configs\agent.yaml"
+if (-not (Test-Path -LiteralPath $agentYaml)) {
+  foreach ($alt in @(
+      (Join-Path $Root "client\configs\agent.windows.yaml"),
+      (Join-Path $Root "client\configs\agent.example.yaml")
+    )) {
+    if (Test-Path -LiteralPath $alt) { $agentYaml = $alt; break }
+  }
+}
+$ident = Read-AgentIdentity $agentYaml
+if (Test-PlaceholderAgentId $env:MONITOR_AGENT_ID) {
+  if (-not (Test-PlaceholderAgentId $ident.agent_id)) { $env:MONITOR_AGENT_ID = $ident.agent_id }
+}
+if (-not $env:MONITOR_ENVIRONMENT) {
+  if ($ident.environment) { $env:MONITOR_ENVIRONMENT = $ident.environment } else { $env:MONITOR_ENVIRONMENT = "test" }
+}
+if (-not $env:MONITOR_SITE) {
+  if ($ident.site) { $env:MONITOR_SITE = $ident.site } else { $env:MONITOR_SITE = "local" }
+}
+if (-not $env:MONITOR_ROLE) {
+  if ($ident.role) { $env:MONITOR_ROLE = $ident.role } else { $env:MONITOR_ROLE = "windows" }
+}
+if (Test-PlaceholderAgentId $env:MONITOR_AGENT_ID) {
+  throw "agent_id missing in $agentYaml. Start monitor-agent once so it writes a stable id."
+}
+$env:MONITOR_MYSQL_DSN = "root:root@tcp(127.0.0.1:3306)/?parseTime=true"
+$env:MONITOR_REDIS_URL = "tcp://127.0.0.1:6379"
+$env:MONITOR_POSTGRES_ADDRESS = "postgres://postgres:123456@127.0.0.1:5432/postgres?sslmode=disable"
+
+$mutex = New-Object System.Threading.Mutex($false, "Global\MonitorTelegraf-$($env:MONITOR_AGENT_ID)")
+$owned = $false
+try {
+  try {
+    $owned = $mutex.WaitOne(0)
+  } catch [System.Threading.AbandonedMutexException] {
+    $owned = $true
+  }
+  if (-not $owned) {
+    throw "Telegraf is already running for agent $($env:MONITOR_AGENT_ID)"
+  }
+  $bufferRoot = Join-Path $Root "Telegraf\buffer"
+  $buffer = Join-Path $bufferRoot $env:MONITOR_AGENT_ID
+  if ((Test-Path $bufferRoot) -and -not (Test-Path $buffer)) {
+    $legacy = Get-ChildItem $bufferRoot -Force -ErrorAction SilentlyContinue
+    if ($legacy.Count -gt 0) {
+      Rename-Item $bufferRoot "$bufferRoot.legacy-$(Get-Date -Format yyyyMMdd-HHmmss)"
+    }
+  }
+  New-Item -ItemType Directory -Force $buffer | Out-Null
+  # Detect corrupted WAL/disk buffer segments and rotate them away BEFORE starting
+  # Telegraf, otherwise Telegraf 1.40 can panic in wal.(*Log).Read with
+  # "index out of range [0] with length 0" on Windows experimental disk buffer.
+  function Repair-TelegrafBuffer([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $items = Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue
+    $damaged = $false
+    if ($items) {
+      $damaged = $false
+      $suspicious = $items | Where-Object { $_.PSIsContainer -and $_.Name -match '^[a-f0-9]{64}$' }
+      $damaged = [bool]$suspicious
+      if (-not $damaged) {
+        foreach ($file in ($items | Where-Object { -not $_.PSIsContainer })) {
+          try {
+            if ($file.Length -eq 0) { $damaged = $true; break }
+            $name = $file.Name
+            if ($name -match '^0+$') { $damaged = $true; break }
+          } catch {
+            $damaged = $true; break
+          }
+        }
+      }
+    }
+    if ($damaged) {
+      $rotated = "$path.corrupted-$(Get-Date -Format yyyyMMdd-HHmmss)"
+      Rename-Item -LiteralPath $path -NewName ([System.IO.Path]::GetFileName($rotated)) -ErrorAction Stop
+      Write-Host "[Telegraf] Rotated damaged buffer directory to $rotated"
+      return $true
+    }
+    return $false
+  }
+  $null = Repair-TelegrafBuffer $buffer
+  New-Item -ItemType Directory -Force -Path $buffer -ErrorAction SilentlyContinue | Out-Null
+  & (Join-Path $Root "Telegraf\telegraf.exe") `
+    --config (Join-Path $Root "Telegraf\telegraf.conf") `
+    --non-strict-env-handling
+} finally {
+  if ($owned) {
+    try { $mutex.ReleaseMutex() } catch {}
+  }
+  $mutex.Dispose()
+}

@@ -1,0 +1,12 @@
+停止命令：
+Set-Location "C:\Users\Administrator\Desktop\monitor\server"
+Get-Process collector.v3,go -ErrorAction SilentlyContinue |
+  Stop-Process -Force
+
+启动命令：
+Set-Location "C:\Users\Administrator\Desktop\monitor\server"
+$env:MONITOR_INFLUX_TOKEN = "hHAFvMnmeOTGOAonL0p3Rq-v_XrSJOS1Yiu_EUbmkJ1ziws3FDJc5Dxof-WPqzkHZadtQPxNbzeMpFgN0QTMSQ=="
+.\collector.exe -config .\configs\server.local.yaml
+
+& "C:\Users\Administrator\Desktop\monitor\server\collector.v3.exe" `
+  --config "C:\Users\Administrator\Desktop\monitor\server\configs\server.local.yaml"

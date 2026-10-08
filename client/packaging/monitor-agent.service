@@ -1,0 +1,20 @@
+[Unit]
+Description=Monitor Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=monitor-agent
+Group=monitor-agent
+ExecStart=/usr/local/bin/monitor-agent --config /etc/monitor-agent/agent.yaml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/monitor-agent /var/log/monitor-agent
+
+[Install]
+WantedBy=multi-user.target

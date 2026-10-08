@@ -1,0 +1,22 @@
+# Local development configuration. Copy this file to server.local.yaml and
+# change paths/secrets for the local machine; server.local.yaml is gitignored.
+grpc_address: ":9500"
+
+postgres:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  database: "postgres"
+  ssl_mode: "disable"
+
+influx:
+  url: "http://localhost:8086"
+  token: "replace-with-an-influxdb-api-token"
+  organization: "hkc"
+  bucket: "bucket"
+
+tls:
+  ca_file: "client/certs/ca.pem"
+  cert_file: "client/certs/server.pem"
+  key_file: "client/certs/server-key.pem"

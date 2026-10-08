@@ -1,0 +1,239 @@
+app:
+  name: app
+  env: local
+
+http:
+  host: 0.0.0.0
+  port: 8080
+  read_timeout_seconds: 5
+  write_timeout_seconds: 10
+
+grpc:
+  host: 0.0.0.0
+
+services:
+  gateway:
+    name: gateway
+
+  user:
+    name: user-service
+    port: 9100
+    target: 127.0.0.1:9100
+  role:
+    name: role-service
+    port: 9101
+    target: 127.0.0.1:9101
+  menu:
+    name: menu-service
+    port: 9102
+    target: 127.0.0.1:9102
+database:
+  driver: mysql
+  dsn: "账号:密码@tcp(服务器IP:3306)/数据库?charset=utf8mb4&parseTime=True&loc=Local"
+
+mysql:
+  dsn: "账号:密码@tcp(服务器IP:3306)/数据库?charset=utf8mb4&parseTime=True&loc=Local"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime_seconds: 3600
+
+postgresql:
+  dsn: ""
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime_seconds: 3600
+
+mongodb:
+  uri: mongodb://127.0.0.1:27017
+  username: ""
+  password: ""
+  database: app
+  app_name: bw-cli
+  min_pool_size: 0
+  max_pool_size: 100
+  connect_timeout_seconds: 10
+  server_selection_timeout_seconds: 5
+
+file_storage:
+  provider: minio
+  max_size_mb: 100
+  object_prefix: uploads
+  public_base_url: ""
+  allowed_extensions:
+    - .doc
+    - .docx
+    - .pdf
+    - .jpg
+    - .jpeg
+    - .png
+    - .gif
+    - .webp
+    - .bmp
+    - .svg
+    - .mp4
+    - .mov
+    - .avi
+    - .mkv
+    - .webm
+    - .mp3
+    - .wav
+    - .ogg
+    - .m4a
+    - .flac
+    - .aac
+  allowed_content_types:
+    - application/msword
+    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    - application/pdf
+    - image/jpeg
+    - image/png
+    - image/gif
+    - image/webp
+    - image/bmp
+    - image/svg+xml
+    - video/mp4
+    - video/quicktime
+    - video/x-msvideo
+    - video/x-matroska
+    - video/webm
+    - audio/mpeg
+    - audio/wav
+    - audio/x-wav
+    - audio/ogg
+    - audio/mp4
+    - audio/flac
+    - audio/aac
+  minio:
+    endpoint: ""
+    access_key_id: ""
+    secret_access_key: ""
+    bucket: ""
+    region: ""
+    use_ssl: false
+  oss:
+    endpoint: ""
+    access_key_id: ""
+    access_key_secret: ""
+    bucket: ""
+  qiniu:
+    access_key: ""
+    secret_key: ""
+    bucket: ""
+    region: ""
+    use_https: true
+    use_cdn_domains: false
+  cos:
+    secret_id: ""
+    secret_key: ""
+    bucket: ""
+    region: ""
+    bucket_url: ""
+
+redis:
+  addr: 127.0.0.1:6379
+  username: ""
+  password: ""
+  db: 0
+  pool_size: 10
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+  lock:
+    key_prefix: app
+    default_ttl: 30s
+
+elasticsearch:
+  addresses:
+    - http://127.0.0.1:9200
+  username: ""
+  password: ""
+  cloud_id: ""
+  api_key: ""
+
+kafka:
+  brokers:
+    - 127.0.0.1:9092
+  topic: app-events
+  group_id: app-consumer
+  client_id: app
+  required_acks: all
+  dial_timeout: 5s
+  producer:
+    max_attempts: 10
+    batch_size: 100
+    batch_bytes: 1048576
+    batch_timeout: 10ms
+    read_timeout: 10s
+    write_timeout: 10s
+    async: false
+    compression: none
+    allow_auto_topic_creation: false
+  consumer:
+    queue_capacity: 100
+    min_bytes: 1
+    max_bytes: 10485760
+    max_wait: 10s
+    read_batch_timeout: 10s
+    commit_interval: 0s
+    heartbeat_interval: 3s
+    session_timeout: 30s
+    rebalance_timeout: 30s
+    start_offset: first
+    watch_partition_changes: true
+    max_attempts: 3
+  sasl:
+    enable: false
+    mechanism: plain
+    username: ""
+    password: ""
+  tls:
+    enable: false
+    insecure_skip_verify: false
+    server_name: ""
+
+alipay:
+  app_id: ""
+  private_key: ""
+  alipay_public_key: ""
+  production: false
+  notify_url: ""
+  return_url: ""
+  encrypt_key: ""
+  app_cert_public_key_path: ""
+  alipay_root_cert_path: ""
+  alipay_cert_public_key_path: ""
+
+middleware:
+  cors:
+    allow_origins:
+      - "*"
+    allow_methods:
+      - GET
+      - POST
+      - PUT
+      - PATCH
+      - DELETE
+      - OPTIONS
+    allow_headers:
+      - Origin
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    allow_credentials: false
+  jwt:
+    secret: ""
+    issuer: app
+    expire_seconds: 7200
+
+log:
+  service: app
+  environment: local
+  level: info
+  encoding: json
+  file:
+    enabled: true
+    filename: logs/app.log
+    max_size_mb: 128
+    max_backups: 14
+    max_age_days: 7
+    compress: true

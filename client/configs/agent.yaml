@@ -1,0 +1,42 @@
+# Local workspace test configuration for monitor-agent.
+# agent_id: generated once (ULID) on first start when empty or a known placeholder, then written
+# back into this file and never replaced. A real id such as "loca-windows" is kept as-is, so a
+# restart or redeploy on the same host keeps the same agent_id (and the same row in postgres agents).
+# Do not copy this file to another host: a shared id makes two hosts overwrite each other.
+agent_id: "loca-windows"
+agent_version: "dev"
+config_version: "local-1"
+labels:
+  environment: test
+  site: local
+  role: windows
+listen_address: "127.0.0.1:9510"
+server_address: "156.245.247.3:9500"
+# server_address: "127.0.0.1:9500"
+insecure_tls: false
+
+# 手动指定上报 IP（用于云服务器公网 IP 场景，不配置则自动探测网卡 IP）
+# report_ip: "1.2.3.4"
+
+# Path convention: like server/webserver, every relative path is resolved against the process
+# working directory, which the one-click scripts set to the package root (the parent of client/).
+# The agent binary, certs and state all live under client/, hence the client/ prefix here;
+# Telegraf stays a top-level directory (shared with Telegraf\run.txt).
+ca_file: "client/certs/ca.pem"
+cert_file: "client/certs/client.pem"
+key_file: "client/certs/client-key.pem"
+state_directory: "client/state"
+heartbeat_interval: 5s
+reconnect_max: 30s
+max_spool_bytes: 1073741824
+max_spool_age: 24h
+max_backlog_batches: 10
+max_backlog_parallel: 1
+backlog_rate_bytes_per_second: 1048576
+retry_base: 1s
+retry_max: 5m
+health_address: "127.0.0.1:9511"
+telegraf_binary: "Telegraf/telegraf.exe"
+telegraf_service: "telegraf"
+telegraf_check_interval: 5s
+auto_recover_telegraf: true

@@ -1,0 +1,6 @@
+influxdb2/influxdb2_windows_amd64/influxd.exe
+Telegraf/telegraf.exe
+server/collector.exe
+influxdb2/influxdb2_windows_amd64.zip
+client/monitor-agent.exe
+webserver/webserver.exe

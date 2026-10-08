@@ -1,0 +1,175 @@
+http_address: ":8090"
+# 控制台滚动打印每次 Web 访问的完整 API 地址和响应时间。
+access_log: false
+sqlite_path: "data/webserver.db"
+
+postgres:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "123456"
+  database: "postgres"
+  ssl_mode: "disable"
+
+influx:
+  url: "http://localhost:8086"
+  organization: "hkc"
+  bucket: "bucket"
+  token: "hHAFvMnmeOTGOAonL0p3Rq-v_XrSJOS1Yiu_EUbmkJ1ziws3FDJc5Dxof-WPqzkHZadtQPxNbzeMpFgN0QTMSQ=="
+
+jwt:
+  secret: "312312312312asa@@!!@#!@!!24fffsfsdfsdfdf24fffsfsdfsdfdf24fffsfsdfsdfdf"
+  access_seconds: 7200
+  refresh_days: 30
+
+# 登录验证码。enabled 缺省为 true；置为 false 后登录接口跳过验证码校验。
+captcha:
+  enabled: true
+  length: 4
+  ttl_seconds: 180
+  max_items: 1000
+  width: 120
+  height: 44
+
+# 附件上传：文件按 upload/年/月/日/ 存放，并通过 /upload/... 直接访问。
+# max_size_mb 为 0 时取默认 50，填负数表示不限制大小。
+upload:
+  dir: "upload"
+  url_prefix: "/upload"
+  max_size_mb: 50
+
+# 远程运维：SSH 终端 + RDP 远程桌面 + 操作审计。
+#   secret_key：SSH/RDP 密码与私钥的 AES-GCM 加密密钥；留空回退 jwt.secret，
+#               也可用环境变量 WEBSERVER_SECRET_KEY 覆盖（推荐生产环境单独设置）。
+#   recording_dir：SSH 会话录像（asciinema v2）目录，按日期分子目录存放。
+remote:
+  secret_key: ""
+  recording_dir: "logs/ssh-recordings"
+
+# Apache Guacamole 嵌入（RDP 远程桌面，浏览器内直接操作 Windows 3389）。
+# Guacamole 官方无 Windows 原生二进制，需 Docker Desktop/WSL2 或部署在 Linux 服务器。
+# enabled=false 时前端隐藏 RDP 入口，SSH 终端不受影响。
+guacamole:
+  enabled: false
+  base_url: "http://127.0.0.1:8080/guacamole"
+  username: "guacadmin"
+  password: "guacadmin"
+  data_source: "mysql"
+
+# 缓存管理：接入 Redis 后可在「系统管理 → 缓存管理」浏览键值并清理缓存；
+# enabled=false 时页面只展示进程内缓存（权限快照、登录验证码）。
+redis:
+  enabled: true
+  addr: "127.0.0.1:6379"
+  username: ""
+  password: ""
+  db: 0
+  # 需要在页面上展示的库；可写多个，如 [0, 1, 10]
+  databases: [0]
+  # 单个库最多扫描的键数，超出部分不展示（避免大库拖慢页面）
+  scan_limit: 5000
+  # 单次 Redis 操作超时（秒）
+  timeout_seconds: 5
+  # 自定义分组（可选）：按业务语义聚合键前缀。
+  # 下面几组是 webserver 自己写入的业务缓存，配置后缓存管理页会按语义分组展示。
+  groups:
+    - name: "字典缓存"
+      pattern: "monitor:dict:*"
+    - name: "配置缓存"
+      pattern: "monitor:config:*"
+    - name: "IP 归属地"
+      pattern: "monitor:iploc:*"
+    - name: "会话失效标记"
+      pattern: "monitor:session:*"
+
+# 业务缓存：字典、系统配置等热点数据的读缓存。
+# 配置了 redis（enabled=true）时写 Redis，否则退化为进程内 TTL 缓存；enabled=false 时直连数据库。
+cache:
+  enabled: true
+  prefix: "monitor:"
+  ttl_seconds: 1800
+
+# IP 归属地查询：登录地点、在线用户、操作日志。
+#   provider 可选：
+#     baidu    —— 默认，百度 opendata 接口，国内直连、免 key、中文、毫秒级
+#     ipapi    —— ip-api.com，海外，免 key，中文，国内访问较慢（3~8s）
+#     pconline —— 太平洋电脑网，部分网络会返回 403
+#     custom   —— 配合 endpoint 模板使用（模板中的 {ip} 会被替换）
+#   sync_wait_ms：登录时最多等待查询结果的时间；超时不阻塞登录，查询会异步补写缓存。
+ip_location:
+  enabled: true
+  provider: "baidu"
+  endpoint: ""
+  timeout_seconds: 6
+  sync_wait_ms: 1500
+  cache_ttl_hours: 168
+  private_label: "内网地址"
+  disabled_label: "未解析(已关闭归属地查询)"
+  unknown_label: "未解析"
+
+# 演示模式：开启后除白名单之外的写操作（POST/PUT/PATCH/DELETE）一律拒绝，
+# 返回 403 与业务码 B0206「演示模式已开启，该操作被禁止」。
+# 白名单固定包含登录、验证码、退出、刷新令牌；需要追加时写 demo_whitelist。
+# 也可用环境变量 WEBSERVER_DEMO_ENABLED=true/1 覆盖。
+demo_enabled: false
+demo_whitelist: []
+
+# 安全中间件。
+#   cors 直接复用原版组件 pkg/middleware.CORS（含预检请求处理）；
+#   xss  清洗 query / 表单 / JSON 体里的脚本特征（<script>、javascript:、on* 事件）；
+#   xsrf 对写方法校验 Origin / Referer：
+#        未带 Origin/Referer 的调用（curl、服务间）放行；
+#        Origin 命中 allow_origins、与请求 Host（含 X-Forwarded-Host）同源、
+#        或双方都是本机回环地址（本地 dev server 走 Vite 代理的常见形态）放行；
+#        其余拒绝 403/B0205，并在日志里打印 origin 与 host 便于排查。
+#        allow_origins 留空时回落 cors.allow_origins 并忽略其中的 "*"；
+#        写 "*" 表示完全不校验（确认部署拓扑下无 CSRF 面时才用）。
+#        用局域网 IP 访问前端（如 http://192.168.1.16:3000）或生产站点与后端
+#        不同源时，把该来源补进 allow_origins 即可。
+# 说明：原版的 middleware.jwt（网关风格 UserID/Role claims）未启用，
+#       本服务的鉴权走自己的会话中间件（RequireAuth + sid 强退 + 权限标识）。
+middleware:
+  cors:
+    allow_origins:
+      - "*"
+    allow_methods:
+      - GET
+      - POST
+      - PUT
+      - PATCH
+      - DELETE
+      - OPTIONS
+    allow_headers:
+      - Origin
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    allow_credentials: false
+  xss:
+    enabled: true
+  xsrf:
+    enabled: true
+    # 本地开发默认放行 Vite dev server；留空表示只校验「同源 + 本机回环」。
+    allow_origins:
+      - "http://localhost:3000"
+      - "http://127.0.0.1:3000"
+
+# 运行日志：复用原版组件 pkg/logger（zap + lumberjack），同时写控制台与文件。
+# 现有代码里的 slog 输出（业务告警、GORM 慢查询/错误、访问日志）都会落进同一份文件。
+log:
+  service: webserver
+  environment: local
+  level: info
+  encoding: json
+  file:
+    enabled: true
+    filename: logs/app.log
+    max_size_mb: 128
+    max_backups: 14
+    max_age_days: 7
+    compress: true
+
+# 初始 admin 密码：非空时会在每次启动时把 admin 密码重置为该值（便于找回入口）。
+# 建议首次部署填写一次后置空；也可通过环境变量 WEBSERVER_ADMIN_PASSWORD 注入。
+# 留空时仅在库中没有 admin 时创建，密码取内置默认值 Monitor123!。
+bootstrap_admin_password: ""

@@ -1,0 +1,18 @@
+Invoke-Expression (Get-Content ".\Telegraf\run.txt" -Raw)
+
+
+$script = Get-Content ".\Telegraf\run.txt" -Raw
+Invoke-Expression $script
+
+
+
+
+& "C:\Users\Administrator\Desktop\monitor\Telegraf\telegraf.exe" `
+  --config "C:\Users\Administrator\Desktop\monitor\Telegraf\telegraf.conf" `
+  --non-strict-env-handling
+
+Invoke-Expression (Get-Content -Raw "C:\Users\Administrator\Desktop\monitor\Telegraf\run.txt")
+
+
+cd C:\Users\Administrator\Desktop\monitor\Telegraf
+Invoke-Expression (Get-Content -Raw .\run.txt)
