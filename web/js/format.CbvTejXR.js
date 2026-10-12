@@ -1,0 +1,1 @@
+function e(e){return e===0?`-`:Math.abs(e*100).toFixed(2).replace(/\.?0+$/,``)+`%`}function t(e,t=1){if(!Number.isFinite(e)||e<=0)return`0 B`;let n=[`B`,`KiB`,`MiB`,`GiB`,`TiB`,`PiB`],r=0,i=e;for(;i>=1024&&r<n.length-1;)i/=1024,r+=1;return`${i.toFixed(r===0?0:t)} ${n[r]}`}function n(e){return`${t(e)}/s`}export{n,e as r,t};

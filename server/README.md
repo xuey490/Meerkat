@@ -3,7 +3,7 @@
 This directory contains the first server-side ingestion path:
 
 - mTLS gRPC Collector on port `9500`;
-- HTTPS management API on port `8080`;
+- HTTPS management API on port `18080` (configurable via `http_address`);
 - PostgreSQL asset, heartbeat, metric receipt, and idempotency records;
 - PostgreSQL outbox-backed Metric Writer for InfluxDB 2 line-protocol writes;
 - State and alert evaluator workers.

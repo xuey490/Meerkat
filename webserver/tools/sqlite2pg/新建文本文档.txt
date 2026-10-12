@@ -1,0 +1,9 @@
+go run . -mode overwrite -pg-dsn "host=localhost port=5432 user=postgres password=123456 dbname=postgres sslmode=disable" -sqlite “C:\Users\Administrator\Desktop\monitor\webserver\data\webserver.db”
+搬迁工具（webserver/tools/sqlite2pg，独立模块）：
+
+参数	说明
+-sqlite	旧库路径，默认 data/webserver.db
+-pg-dsn	PostgreSQL 连接串（必填）
+-mode	insert-only（跳过已存在，可重复执行）／overwrite（先清空再写入，首次迁移用）
+-check	只检查超长数据，不写入
+-dry-run	只统计行数

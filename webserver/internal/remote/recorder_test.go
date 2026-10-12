@@ -68,7 +68,7 @@ func TestCommandCaptureAggregates(t *testing.T) {
 // TestRecordingPathLayout 校验录像相对路径的目录结构契约（日期子目录 + 零填充文件名）。
 func TestRecordingPathLayout(t *testing.T) {
 	root := t.TempDir()
-	service := New(nil, "test-secret", root, nil)
+	service := New(nil, "test-secret", root, GuacOptions{})
 
 	relative := service.RecordingPath(42)
 	if filepath.Dir(relative) == "." {

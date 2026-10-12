@@ -29,7 +29,8 @@ services:
     volumes:
       - ./logs:/app/logs
     ports:
-      - "8080:8080"
+      # 与 configs/webserver.yaml 的 http_address（:8090）保持一致。
+      - "8090:8090"
 
   postgres:
     image: postgres:16-alpine

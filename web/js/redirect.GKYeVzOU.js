@@ -1,0 +1,1 @@
+import{S as e,V as t,h as n}from"./runtime-core.esm-bundler.DgOyhGNo.js";import{g as r,h as i}from"./useApi-BPuI6ZR9.DigZPpzv.js";var a=e({__name:`redirect`,setup(e){let a=i(),o=r(),s=a.params.path,c=Array.isArray(s)?s.join(`/`):s;return o.replace({path:`/${c||``}`,query:a.query}),(e,r)=>(t(),n(`div`))}});export{a as default};

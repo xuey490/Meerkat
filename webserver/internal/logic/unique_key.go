@@ -72,16 +72,18 @@ func UniqueOrInternal(err error, conflictMessage, internalMessage string) error 
 // 幂等：只处理键中不含标记的行，重复执行不会二次改写。
 //
 // 参数 Parameters:
-//   - db (*gorm.DB): 权限库会话（SQLite）。
+//   - db (*gorm.DB): 权限库会话（PostgreSQL）。
 //   - table (string): 表名，仅允许内部常量传入。
 //   - keyColumn (string): 业务唯一键列名；需要转义的列名请自行带引号（如 `"key"`）。
 //
 // 返回 Returns:
 //   - err (error): 执行失败时返回原始错误。
 func FreeSoftDeletedKeys(db *gorm.DB, table, keyColumn string) error {
+	// id::text 不能省：PostgreSQL 的 text || integer 没有隐式转换，会直接报类型错误。
+	// strpos 对应 SQLite 的 instr（PG 无 instr 函数）。
 	statement := "UPDATE " + table +
-		" SET " + keyColumn + " = " + keyColumn + " || ? || id" +
-		" WHERE delete_time IS NOT NULL AND instr(" + keyColumn + ", ?) = 0"
+		" SET " + keyColumn + " = " + keyColumn + " || ? || id::text" +
+		" WHERE delete_time IS NOT NULL AND strpos(" + keyColumn + ", ?) = 0"
 	return db.Exec(statement, deletedKeyMarker, deletedKeyMarker).Error
 }
 
@@ -99,8 +101,9 @@ func softDeleteFreeKey(tx *gorm.DB, table, keyColumn string, ids []int64) error 
 	if len(ids) == 0 {
 		return nil
 	}
+	// 同 FreeSoftDeletedKeys：id::text 是 PostgreSQL 下 text || integer 的必要转换。
 	statement := "UPDATE " + table +
-		" SET delete_time = ?, " + keyColumn + " = " + keyColumn + " || ? || id" +
+		" SET delete_time = ?, " + keyColumn + " = " + keyColumn + " || ? || id::text" +
 		" WHERE id IN ? AND delete_time IS NULL"
 	return tx.Exec(statement, time.Now(), deletedKeyMarker, ids).Error
 }

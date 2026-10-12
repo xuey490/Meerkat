@@ -8,7 +8,6 @@ package monitor
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -132,6 +131,18 @@ type Alert struct {
 	Acknowledged bool `json:"acknowledged"`
 	// SilencedUntil 静默截止时间。
 	SilencedUntil *time.Time `json:"silencedUntil"`
+	// MetricKey 指标标识（仅资源告警写入；迁移前的历史数据为空）。
+	MetricKey string `json:"metricKey"`
+	// Level 告警级别：warning / critical（仅资源告警写入）。
+	Level string `json:"level"`
+	// DetailsJSON 归因与系统上下文快照（仅资源告警写入），详情弹窗解析它展示进程 TopN。
+	DetailsJSON string `json:"detailsJson"`
+	// LastSeenAt 最近一次评估仍处于该状态的时间。
+	LastSeenAt *time.Time `json:"lastSeenAt"`
+	// RepeatCount 本轮告警期间的重申次数（级别变化或恢复时清零）。
+	RepeatCount int64 `gorm:"column:repeat_count" json:"repeatCount"`
+	// LastRepeatedAt 最近一次重申时间；为空表示尚未重申过。
+	LastRepeatedAt *time.Time `json:"lastRepeatedAt"`
 	// UpdatedAt 更新时间。
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -242,10 +253,15 @@ type OverviewResult struct {
 }
 
 // 指标白名单：与前端可选的测量项一致，避免任意 measurement 注入 Flux 查询。
+//
+// swap 与 netstat 是 Telegraf 已启用的插件（inputs.swap / inputs.netstat），
+// 服务器详情页的「交换分区」「连接数」卡片直接依赖它们，因此一并放行。
 var allowedMeasurements = map[string]bool{
-	"cpu": true, "mem": true, "disk": true, "diskio": true, "net": true, "system": true,
-	"processes": true, "mysql": true, "redis": true, "postgresql": true,
+	"cpu": true, "mem": true, "swap": true, "disk": true, "diskio": true, "net": true, "system": true,
+	"processes": true, "procstat": true, "netstat": true, "mysql": true, "redis": true, "postgresql": true,
 	"rabbitmq": true, "http_response": true, "docker": true,
+	"docker_container_cpu": true, "docker_container_mem": true, "docker_container_net": true,
+	"docker_container_blkio": true, "docker_container_status": true,
 	"win_cpu": true, "win_memory": true, "win_system": true,
 }
 
@@ -399,31 +415,95 @@ func (s *Service) Containers(agentID string) ([]Container, error) {
 	return rows, nil
 }
 
+// AlertQuery 描述一次告警列表查询。
+//
+// 各过滤条件相互独立，为空表示不过滤；服务器详情页的「告警事件」页签即按
+// agentID + state + level + acknowledged 组合查询。
+type AlertQuery struct {
+	// Page 页码，从 1 开始。
+	Page int
+	// Size 每页条数。
+	Size int
+	// AgentID 服务器过滤。
+	AgentID string
+	// State 状态过滤：warning / critical / ok / offline。
+	State string
+	// Level 级别过滤：warning / critical。
+	Level string
+	// Acknowledged 确认状态过滤；nil 表示不过滤。
+	Acknowledged *bool
+	// Scope 告警范围：active（未结束，告警中心默认）/ history（已结束）；空表示不过滤。
+	Scope string
+	// Keyword 关键字：模糊匹配主机标识、指标标识与告警目标。
+	Keyword string
+}
+
+// allowedAlertStates 是告警状态白名单，避免任意字符串拼进 SQL 条件（虽已参数化，但语义上也要收敛）。
+var allowedAlertStates = map[string]bool{"warning": true, "critical": true, "ok": true, "offline": true}
+
+// allowedAlertLevels 是告警级别白名单。
+var allowedAlertLevels = map[string]bool{"warning": true, "critical": true}
+
+// allowedAlertScopes 是告警范围白名单：active=未结束，history=已结束。
+var allowedAlertScopes = map[string]bool{"active": true, "history": true}
+
 // Alerts 分页查询告警。
 //
 // 参数 Parameters:
-//   - page (int): 页码。
-//   - size (int): 每页条数。
-//   - state (string): 状态过滤。
-//   - agentID (string): Agent 过滤。
+//   - q (AlertQuery): 查询条件；State / Level 必须在白名单内，否则返回 ErrInvalidFilter。
 //
 // 返回 Returns:
-//   - result (Page[Alert]): 分页结果。
-//   - err (error): 查询失败时返回非 nil。
-func (s *Service) Alerts(page, size int, state, agentID string) (Page[Alert], error) {
-	db := s.db.Model(&Alert{})
-	if state != "" {
-		db = db.Where("state = ?", state)
+//   - result (Page[Alert]): 按 updated_at 倒序的分页结果。
+//   - err (error): 过滤条件非法返回 ErrInvalidFilter；数据库不可用返回原始错误。
+func (s *Service) Alerts(q AlertQuery) (Page[Alert], error) {
+	if q.State != "" && !allowedAlertStates[q.State] {
+		return Page[Alert]{}, ErrInvalidFilter
 	}
-	if agentID != "" {
-		db = db.Where("agent_id = ?", agentID)
+	if q.Level != "" && !allowedAlertLevels[q.Level] {
+		return Page[Alert]{}, ErrInvalidFilter
+	}
+	if q.Scope != "" && !allowedAlertScopes[q.Scope] {
+		return Page[Alert]{}, ErrInvalidFilter
+	}
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.Size < 1 {
+		q.Size = 20
+	}
+	db := s.db.Model(&Alert{})
+	if q.AgentID != "" {
+		db = db.Where("agent_id = ?", q.AgentID)
+	}
+	if q.State != "" {
+		db = db.Where("state = ?", q.State)
+	}
+	if q.Level != "" {
+		db = db.Where("level = ?", q.Level)
+	}
+	if q.Acknowledged != nil {
+		db = db.Where("acknowledged = ?", *q.Acknowledged)
+	}
+	// 活动 = 未结束（closed_at 为空），历史 = 已结束。
+	// 不传 scope 时不做限制，保持对旧调用方兼容。
+	switch q.Scope {
+	case "active":
+		db = db.Where("closed_at IS NULL")
+	case "history":
+		db = db.Where("closed_at IS NOT NULL")
+	}
+	// 关键字检索：模糊匹配主机、指标与目标，省去在长列表里逐页翻找
+	//（关键字已由 HTTP 层 TrimSpace，这里非空即有效）。
+	if q.Keyword != "" {
+		like := "%" + q.Keyword + "%"
+		db = db.Where("agent_id ILIKE ? OR metric_key ILIKE ? OR target_id ILIKE ?", like, like, like)
 	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
 		return Page[Alert]{}, err
 	}
 	var rows []Alert
-	if err := db.Order("updated_at desc").Offset((page - 1) * size).Limit(size).Find(&rows).Error; err != nil {
+	if err := db.Order("updated_at desc").Offset((q.Page - 1) * q.Size).Limit(q.Size).Find(&rows).Error; err != nil {
 		return Page[Alert]{}, err
 	}
 	return Page[Alert]{List: rows, Total: total}, nil
@@ -449,34 +529,41 @@ func (s *Service) Maintenance() ([]MaintenanceWindow, error) {
 // Metrics 查询 InfluxDB 中的指标曲线。
 //
 // 参数 Parameters:
-//   - measurement (string): 指标类型，必须在白名单内。
-//   - agentID (string): Agent ID。
-//   - start (string): Flux range start，如 -1h。
+//   - q (MetricQuery): 查询描述；会先被 normalize 补默认值，再被 validate 校验。
 //
 // 返回 Returns:
-//   - points ([]MetricPoint): 数据点。
-//   - err (error): 参数非法时返回 ErrInvalidMeasurement / ErrInvalidAgent / ErrInvalidRange。
-func (s *Service) Metrics(measurement, agentID, start string) ([]MetricPoint, error) {
-	if !allowedMeasurements[measurement] {
-		return nil, ErrInvalidMeasurement
-	}
-	agentID = strings.TrimSpace(agentID)
-	if agentID == "" || agentID == "undefined" || agentID == "null" {
-		return nil, ErrInvalidAgent
-	}
-	if len(start) > 32 {
-		return nil, ErrInvalidRange
+//   - points ([]MetricPoint): 数据点，按 InfluxDB 返回顺序（时间升序、序列分组）。
+//   - err (error): 参数非法时返回 ErrInvalidMeasurement / ErrInvalidAgent / ErrInvalidRange /
+//     ErrInvalidField / ErrInvalidAggregate；InfluxDB 不可用返回 ErrInfluxUnavailable。
+//
+// 行为约束：阻塞直到 InfluxDB 返回或 queryTimeout 超时；只读，不写任何存储。
+func (s *Service) Metrics(q MetricQuery) ([]MetricPoint, error) {
+	q.normalize()
+	if err := q.validate(); err != nil {
+		return nil, err
 	}
 	if s.influx == nil {
 		return nil, ErrInfluxUnavailable
 	}
-	safeAgentID := strings.ReplaceAll(agentID, `"`, `\"`)
-	query := fmt.Sprintf(
-		`from(bucket: %q) |> range(start: %s) |> filter(fn: (r) => r._measurement == %q and r.agent_id == %q) |> limit(n: 5000)`,
-		s.influxBucket, start, measurement, safeAgentID)
-	result, err := s.influx.QueryAPI(s.influxOrg).Query(context.Background(), query)
+	return s.query(q.flux(s.influxBucket))
+}
+
+// query 执行 Flux 语句并把结果展开为数据点。
+//
+// 参数 Parameters:
+//   - fluxQuery (string): 已构造好的 Flux 语句。
+//
+// 返回 Returns:
+//   - points ([]MetricPoint): 数据点；无数据时为空切片（非 nil）。
+//   - err (error): 连接失败或读取失败返回 ErrInfluxUnavailable（原因记入日志）。
+//
+// 行为约束：阻塞至多 queryTimeout；每次查询自动关闭 Influx 结果游标。
+func (s *Service) query(fluxQuery string) ([]MetricPoint, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	result, err := s.influx.QueryAPI(s.influxOrg).Query(ctx, fluxQuery)
 	if err != nil {
-		slog.Error("influx 查询失败", "org", s.influxOrg, "bucket", s.influxBucket, "measurement", measurement, "error", err)
+		slog.Error("influx 查询失败", "org", s.influxOrg, "bucket", s.influxBucket, "query", fluxQuery, "error", err)
 		return nil, ErrInfluxUnavailable
 	}
 	defer result.Close()
@@ -491,7 +578,7 @@ func (s *Service) Metrics(measurement, agentID, start string) ([]MetricPoint, er
 		})
 	}
 	if result.Err() != nil {
-		slog.Error("influx 读取失败", "org", s.influxOrg, "bucket", s.influxBucket, "measurement", measurement, "error", result.Err())
+		slog.Error("influx 读取失败", "org", s.influxOrg, "bucket", s.influxBucket, "query", fluxQuery, "error", result.Err())
 		return nil, ErrInfluxUnavailable
 	}
 	return points, nil

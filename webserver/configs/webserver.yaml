@@ -1,8 +1,89 @@
 http_address: ":8090"
 # 控制台滚动打印每次 Web 访问的完整 API 地址和响应时间。
 access_log: false
-sqlite_path: "data/webserver.db"
 
+# HTTP 防护配置
+#
+# 保护范围：
+#   1. 通用 API：按客户端 IP 统计请求次数，防止单个来源持续占用接口资源。
+#   2. 登录接口：使用独立的限流配额，避免登录暴破影响其他 API。
+#   3. 登录失败锁定：同一账户连续输错密码达到 login_failure_limit 次后，
+#      锁定账号 lockout_minutes 分钟；lockout_ip=true 时同时锁定来源 IP，
+#      防止用同一出口 IP 轮换账号名继续暴破。
+#      失败次数按账号与来源 IP 分别计数，存于 Redis（cache.enabled 关闭时退化为
+#      进程内缓存），计数键自带 TTL，到期自动解锁，无需清理任务；
+#      可在「系统管理 → 缓存管理」按 monitor:login:fail: 前缀查看剩余时间或手工解锁。
+#      成功登录只清零账号维度的计数；IP 维度计数只随 TTL 衰减，避免用已知账号
+#      反复重置计数绕过 IP 锁定（该 IP 上仍可被 TTL 自然解锁）。
+#   4. IP 黑名单：命中后直接拒绝请求。
+#   5. IP 白名单：白名单优先级最高，命中后不受黑名单、API 限流、登录限流
+#      和登录失败锁定限制影响。请只加入可信的固定办公网、跳板机或管理网段。
+#      注意：多个用户共用一个出口 IP（NAT/办公网）时，建议把该网段加入白名单，
+#      否则该 IP 触发锁定会连带影响同一出口下的所有用户。
+#
+# 限流算法为进程内按 IP 的滑动时间窗口：
+#   - api_requests / login_requests 表示窗口内允许的最大请求数；
+#   - api_window_seconds / login_window_seconds 表示窗口长度，单位为秒；
+#   - 超过配额返回 HTTP 429，并带有 Retry-After 响应头；
+#   - 当前限流状态保存在 webserver 进程内，重启后会清空（登录失败锁定走缓存，不受影响）。
+#
+# 地址格式：
+#   - 单个 IPv4/IPv6：192.168.1.10、2001:db8::10；
+#   - CIDR 网段：192.168.1.0/24、2001:db8::/32；
+#   - 多个地址或网段使用 YAML 列表逐项配置。
+protection:
+  # 总开关。false 时关闭 IP 黑名单和两类请求限流；
+  # 登录失败次数锁定仍由 login_failure_limit / lockout_minutes 单独控制。
+  enabled: true
+
+  # 通用 API 限流：每个客户端 IP 在 api_window_seconds 秒内最多请求次数。
+  # 例如 120/60 表示单 IP 每分钟最多 120 次通用 API 请求。
+  api_requests: 150
+  api_window_seconds: 60
+
+  # 登录接口限流：每个客户端 IP 在 login_window_seconds 秒内最多登录请求次数。
+  # 建议该值低于通用 API，常见配置为每分钟 5~20 次。
+  login_requests: 10
+  login_window_seconds: 60
+
+  # 登录失败锁定阈值。连续输错密码达到该次数后锁定账户。
+  # 设为 0 或不填写时由程序使用默认值 5。
+  login_failure_limit: 5
+
+  # 登录锁定时长，单位为分钟。锁定期内非白名单 IP 登录会被拒绝。
+  # 该值同时是失败计数键（monitor:login:fail:*）的 TTL，到期自动解锁。
+  # 设为 0 或不填写时由程序使用默认值 30。
+  lockout_minutes: 30
+
+  # 达到失败阈值时是否同时锁定来源 IP。不填写时默认 true。
+  # 置为 false 则只锁账号，适合同一出口 IP 承载大量合法用户的部署。
+  lockout_ip: true
+
+  # 是否信任反向代理传递的 X-Forwarded-For / X-Real-IP。
+  # 只有当 webserver 前面有可信 Nginx、网关或负载均衡时才建议设为 true；
+  # 直接暴露 webserver 时应保持 false，避免客户端伪造来源 IP 绕过限流。
+  trust_proxy_headers: false
+
+  # IP 黑名单：命中后返回 403。
+  # 示例：
+  # blacklist:
+  #   - "203.0.113.10"       # 禁止单个公网 IP
+  #   - "203.0.113.0/24"     # 禁止整个网段
+  blacklist: []
+
+  # IP 白名单：命中后跳过黑名单、通用 API 限流、登录限流和登录失败锁定。
+  # 示例：
+  # whitelist:
+  #   - "127.0.0.1"          # 本机管理脚本
+  #   - "192.168.1.20"       # 固定管理终端
+  #   - "10.10.0.0/16"       # 可信内网网段
+  whitelist: []
+
+# 数据库备份目录：计划任务的备份产物落在这里，启动时会自动创建。
+backup_dir: "data/backup"
+
+# PostgreSQL：权限库（sa_system_*）与监控库（agents/alerts/...）共用这一套连接参数，
+# 两者在同一个 database 内靠表名前缀区分。
 postgres:
   host: "localhost"
   port: 5432
@@ -10,6 +91,14 @@ postgres:
   password: "123456"
   database: "postgres"
   ssl_mode: "disable"
+  # 会话时区：种子 SQL 用 localtimestamp 写本地时间，GORM 写时间也要用同一基准，
+  # 否则同一列会混进两种时区的时间。
+  timezone: "Asia/Shanghai"
+  # 权限库连接池。原 SQLite 实现把连接数强制限制为 1，所有请求串行排队，
+  # 并发一高就报 database is locked；这里放开并发连接数。
+  max_open_conns: 20
+  max_idle_conns: 5
+  conn_max_lifetime_seconds: 1800
 
 influx:
   url: "http://localhost:8086"
@@ -46,15 +135,30 @@ remote:
   secret_key: ""
   recording_dir: "logs/ssh-recordings"
 
-# Apache Guacamole 嵌入（RDP 远程桌面，浏览器内直接操作 Windows 3389）。
-# Guacamole 官方无 Windows 原生二进制，需 Docker Desktop/WSL2 或部署在 Linux 服务器。
-# enabled=false 时前端隐藏 RDP 入口，SSH 终端不受影响。
-guacamole:
-  enabled: false
-  base_url: "http://127.0.0.1:8080/guacamole"
-  username: "guacadmin"
-  password: "guacadmin"
-  data_source: "mysql"
+# 远程桌面（Apache Guacamole 的 guacd 网关）：浏览器内直接操作 Windows 3389 / VNC。
+#
+# 只需部署 guacd 这一个 C 守护进程，不部署 guacamole-client（Java/Tomcat/MySQL）。
+#   address                 guacd 地址，默认 127.0.0.1:4822。
+#   recording_enabled       是否录制会话；输出 .guac 指令流，可在「远程会话」页回放。
+#   recording_dir_in_guacd  传给 guacd 的录像目录（【guacd 所在文件系统】的路径）。
+#   local_recording_dir     webserver 读录像的目录（【本进程所在文件系统】的路径）。
+#   两者指向同一份文件。guacd 与 webserver 同机（当前 vm3）时两个路径相同；
+#   若 guacd 在 WSL2、webserver 在 Windows，则分别是 /mnt/c/... 与 C:\...。
+#   路径在 guacd 上不存在时，开启录像会让握手直接失败。
+#
+# 部署脚本：scripts/guacd/deploy-guacd.ps1（Windows/WSL2）、deploy-guacd.sh（Linux）。
+# 排查工具：scripts/guacd/probe-guacd.py（独立验证 guacd 是否响应握手）。
+# enabled=false 时前端隐藏远程桌面入口，SSH 终端完全不受影响。
+guac:
+  enabled: true
+  address: "192.168.1.18:4822"
+  recording_enabled: true
+  recording_dir_in_guacd: "/opt/monitor/guac-recordings"
+  local_recording_dir: "/opt/monitor/guac-recordings"
+  connect_timeout_seconds: 5
+  handshake_timeout_seconds: 15
+  idle_timeout_seconds: 600
+  retention_days: 30
 
 # 缓存管理：接入 Redis 后可在「系统管理 → 缓存管理」浏览键值并清理缓存；
 # enabled=false 时页面只展示进程内缓存（权限快照、登录验证码）。
@@ -81,6 +185,8 @@ redis:
       pattern: "monitor:iploc:*"
     - name: "会话失效标记"
       pattern: "monitor:session:*"
+    - name: "登录失败锁定"
+      pattern: "monitor:login:fail:*"
 
 # 业务缓存：字典、系统配置等热点数据的读缓存。
 # 配置了 redis（enabled=true）时写 Redis，否则退化为进程内 TTL 缓存；enabled=false 时直连数据库。
@@ -153,6 +259,7 @@ middleware:
     allow_origins:
       - "http://localhost:3000"
       - "http://127.0.0.1:3000"
+      - "http://192.168.1.14:3000"
 
 # 运行日志：复用原版组件 pkg/logger（zap + lumberjack），同时写控制台与文件。
 # 现有代码里的 slog 输出（业务告警、GORM 慢查询/错误、访问日志）都会落进同一份文件。
@@ -169,7 +276,52 @@ log:
     max_age_days: 7
     compress: true
 
-# 初始 admin 密码：非空时会在每次启动时把 admin 密码重置为该值（便于找回入口）。
+# 资源告警：CPU / 内存 / 系统负载 / 磁盘「持续」超阈值 → 写本地日志 + 同步告警中心。
+#   阈值与判定期不在这里，而是在「监控中心 → 告警规则」页与服务器列表的「告警设置」里
+#   按「全局 → 角色 → 单机」三层配置（存 PostgreSQL 监控库）；本段只控制开关、查询与日志行为。
+#   判定口径（避免误报的关键，与页面上的口径说明一致）：
+#     - CPU 利用率 = 100 - usage_idle（整机合计）
+#     - 内存利用率 = 100 - available_percent（不含可回收的 cache，避免长期假高）
+#     - 系统负载   = load1 / 逻辑核数（负载是绝对值，必须归一化后才能跨机比较）
+#     - 磁盘利用率 = used_percent（按挂载点分别判定，已排除 tmpfs/overlay 等伪文件系统）
+#   告警记录的生命周期（一条记录 = 一次「事件」）：
+#     - 去重：同一主机同一指标在告警期间只有一条活动记录（磁盘再加挂载点维度）；
+#     - 结束：人工在告警中心「确认并结束」，或指标自动回落正常；结束时写 closed_at + close_reason，
+#       state 仍如实反映指标状态（确认时指标可能依然超限）；
+#     - 重新告警：结束后进入恢复冷却期（规则里的「恢复冷却」cooldown_seconds，默认 10 分钟），
+#       冷却期内即使仍超标也不输出；冷却期过后仍超标则产生**一条全新记录**，
+#       首次触发时间与重申次数都从零重新计算，不会叠加到已结束的那条记录上；
+#       确认「已结束」的记录时不会顺延冷却期（重复点击是幂等的）。
+alert:
+  enabled: true
+  # 评估周期（秒）。1 分钟与既有评估器节奏一致；机器很多时可适当放大。
+  evaluate_interval_seconds: 60
+  query:
+    # 同一规则下的多台主机合并为一次 Flux 查询（20 台机 × 4 类规则：80 次/分 → 4 次/分）。
+    merge_hosts: true
+    # 单次查询返回点数上限保护。
+    max_points: 2000
+  log:
+    enabled: true
+    # json（结构化，便于检索统计）/ text（人读）/ both
+    format: both
+    # 告警按「主机 + 日期」分文件，一份文件就是「某台机某天发生过的全部告警」：
+    #   {agent} = 主机标识（会做文件名安全化，"/" ":" 空格等非法字符替换为下划线）
+    #   {date}  = 事件日期（YYYYMMDD）
+    # 展开后同时产出两份：<名字>.log（JSON Lines）与 <名字>.txt（人读）。
+    dir: "logs"
+    name_pattern: "{agent}-{date}-alerts"   # → logs/loca-windows-20261009-alerts.txt / .log
+    max_size_mb: 32
+    max_backups: 14
+    max_age_days: 30
+    compress: true
+  attribution:
+    # 归因展示的进程条数（CPU 与内存告警都会给出占用 TopN）。
+    top_n: 5
+    # 优先使用 Telegraf 进程级采集（procstat）；关闭或数据缺失时退化为心跳里的进程内存快照。
+    prefer_procstat: true
+
+# 初始 admin 密码：非空时会在启动时把 admin 密码重置为该值（便于找回入口）。
 # 建议首次部署填写一次后置空；也可通过环境变量 WEBSERVER_ADMIN_PASSWORD 注入。
 # 留空时仅在库中没有 admin 时创建，密码取内置默认值 Monitor123!。
 bootstrap_admin_password: ""

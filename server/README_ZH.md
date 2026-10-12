@@ -3,7 +3,7 @@
 这是监控平台服务端的本地开发版本，当前包含：
 
 - mTLS gRPC Collector，默认监听 `9500`
-- HTTPS 管理 API，默认监听 `8080`
+- HTTPS 管理 API，默认监听 `18080`（可用 `http_address` 配置）
 - PostgreSQL Agent、心跳、指标收据和状态模型
 - PostgreSQL Outbox 持久事件队列
 - 独立 Metric Writer，负责写入 InfluxDB
@@ -63,7 +63,7 @@ go run .\cmd\collector -config .\configs\server.local.yaml
 
 ```text
 gRPC Collector listening address=:9500
-HTTPS management API listening address=:8080
+HTTPS management API listening address=:18080
 ```
 
 Collector 启动时还会用彩色文本输出服务端自身的操作系统版本、UTC 时间、
@@ -112,21 +112,21 @@ sudo -E /usr/local/bin/monitor-collector \
 ## 管理 API
 
 ```text
-GET  https://localhost:8080/healthz
-GET  https://localhost:8080/api/v1/agents
-POST https://localhost:8080/api/v1/agents/enroll
-POST https://localhost:8080/api/v1/agents/heartbeat
-GET  https://localhost:8080/api/v1/agents/{id}
-DELETE https://localhost:8080/api/v1/agents/{id}
-GET  https://localhost:8080/api/v1/agents/{id}/config
-GET  https://localhost:8080/api/v1/agents/{id}/services
-GET  https://localhost:8080/api/v1/agents/{id}/containers
-GET  https://localhost:8080/api/v1/alerts
-GET  https://localhost:8080/api/v1/rules
-POST https://localhost:8080/api/v1/rules
-GET  https://localhost:8080/api/v1/maintenance
-POST https://localhost:8080/api/v1/maintenance
-POST https://localhost:8080/api/v1/audit
+GET  https://localhost:18080/healthz
+GET  https://localhost:18080/api/v1/agents
+POST https://localhost:18080/api/v1/agents/enroll
+POST https://localhost:18080/api/v1/agents/heartbeat
+GET  https://localhost:18080/api/v1/agents/{id}
+DELETE https://localhost:18080/api/v1/agents/{id}
+GET  https://localhost:18080/api/v1/agents/{id}/config
+GET  https://localhost:18080/api/v1/agents/{id}/services
+GET  https://localhost:18080/api/v1/agents/{id}/containers
+GET  https://localhost:18080/api/v1/alerts
+GET  https://localhost:18080/api/v1/rules
+POST https://localhost:18080/api/v1/rules
+GET  https://localhost:18080/api/v1/maintenance
+POST https://localhost:18080/api/v1/maintenance
+POST https://localhost:18080/api/v1/audit
 ```
 
 当前 HTTPS API 是开发版本，尚未接入 OIDC/RBAC；禁止直接暴露到公网。

@@ -33,6 +33,9 @@
 [[inputs.diskio]]
   interval = "30s"
 [[inputs.net]]
+# 连接数（TCP/UDP 套接字）供服务器详情页「连接数」卡片使用；
+# 只读内核套接字状态表，开销与 inputs.net 同量级。
+[[inputs.netstat]]
 [[inputs.processes]]
   interval = "30s"
 [[inputs.internal]]

@@ -28,7 +28,7 @@ go run ./cmd/certgen -out ../scripts/cert -ip "127.0.0.1,192.168.1.100" -dns "lo
 或指定公网 IP：
 
 ```bash
-go run ./cmd/certgen -out ../scripts/cert -ip "127.0.0.1,123.45.67.89,192.168.1.12" -dns "localhost,monitor.example.com"
+go run ./cmd/certgen -out ../scripts/cert -ip "127.0.0.1,123.45.67.89,192.168.1.14,156.245.247.3" -dns "localhost,monitor.example.com"
 ```
 
 ### 2. 输出位置

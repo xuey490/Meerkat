@@ -9,7 +9,12 @@ import (
 )
 
 type Config struct {
-	GRPCAddress string         `yaml:"grpc_address"`
+	GRPCAddress string `yaml:"grpc_address"`
+	// HTTPAddress HTTPS 管理 API 的监听地址。
+	//
+	// 默认 :18080 而不是 :8080：8080 在开发机上会被其它服务占用（本机实际发生过冲突），
+	// 且该端口原本是硬编码在 collector 的 main 里、无法按环境调整。
+	HTTPAddress string         `yaml:"http_address"`
 	Postgres    PostgresConfig `yaml:"postgres"`
 	Influx      InfluxConfig   `yaml:"influx"`
 	TLS         TLSConfig      `yaml:"tls"`
@@ -68,6 +73,9 @@ func (c *Config) applyEnvironment() {
 func (c *Config) setDefaults() {
 	if c.GRPCAddress == "" {
 		c.GRPCAddress = ":9500"
+	}
+	if c.HTTPAddress == "" {
+		c.HTTPAddress = ":18080"
 	}
 	if c.Postgres.Port == 0 {
 		c.Postgres.Port = 5432

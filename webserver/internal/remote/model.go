@@ -8,8 +8,10 @@ import "time"
 const (
 	// ProtocolSSH 是 SSH 协议。
 	ProtocolSSH = "ssh"
-	// ProtocolRDP 是 RDP 协议。
+	// ProtocolRDP 是 RDP 协议（Windows 远程桌面）。
 	ProtocolRDP = "rdp"
+	// ProtocolVNC 是 VNC 协议（跨平台的远程帧缓冲）。
+	ProtocolVNC = "vnc"
 )
 
 // 认证方式常量。
@@ -36,10 +38,13 @@ const (
 type RemoteEndpoint struct {
 	// ID 主键（自增）。
 	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`
-	// AgentID 关联的监控资产主键（agents.id），唯一。
-	AgentID string `gorm:"column:agent_id;uniqueIndex;size:128" json:"agentId"`
-	// Protocol 协议：ssh / rdp。
-	Protocol string `gorm:"column:protocol;size:16" json:"protocol"`
+	// AgentID 关联的监控资产主键（agents.id）。
+	//
+	// 与 Protocol 组成复合唯一键，而不是单独唯一：同一台资产既要能用 SSH 终端、
+	// 又要能用 VNC/RDP 远程桌面，各协议各存一条；但同一协议不允许重复配置。
+	AgentID string `gorm:"column:agent_id;uniqueIndex:uk_agent_protocol;size:128" json:"agentId"`
+	// Protocol 协议：ssh / rdp / vnc。
+	Protocol string `gorm:"column:protocol;size:16;uniqueIndex:uk_agent_protocol" json:"protocol"`
 	// Host 连接地址（IP 或域名）。
 	Host string `gorm:"column:host;size:255" json:"host"`
 	// Port 端口。
@@ -117,20 +122,41 @@ type SSHCommand struct {
 // TableName 返回 ssh_commands 表名。
 func (SSHCommand) TableName() string { return "ssh_commands" }
 
-// RDPSession 对应 rdp_sessions 表：一次 RDP（Guacamole）连接记录。
+// RDPSession 对应 rdp_sessions 表：一次远程桌面（RDP / VNC，经 guacd）连接记录。
+//
+// 表名保留为 rdp_sessions：重命名会让 GORM 自动迁移新建一张空表、旧数据成为孤儿，
+// 而本次「去重维度不变、只是补字段」，新增列的风险可控得多。
+//
+// 注意：新增的值类型字段都带 default，字符串字段允许为空。原因是老数据行上新增列为 NULL，
+// 而 Go 侧字段是值类型，读 NULL 会直接报 "converting NULL to string is unsupported"，
+// 导致整表查询整体失败——这个坑在告警模块改造中已真实踩过。
 type RDPSession struct {
 	// ID 主键（自增）。
 	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`
 	// AgentID 目标资产主键。
 	AgentID string `gorm:"column:agent_id;size:128" json:"agentId"`
+	// Protocol 协议：rdp / vnc。
+	Protocol string `gorm:"column:protocol;size:16;default:''" json:"protocol"`
 	// Operator 操作人账号。
 	Operator string `gorm:"column:operator;size:128" json:"operator"`
 	// Username 登录目标机的用户名。
 	Username string `gorm:"column:username;size:128" json:"username"`
-	// GuacConnectionID Guacamole 连接 ID。
-	GuacConnectionID string `gorm:"column:guac_connection_id;size:128" json:"guacConnectionId"`
+	// ClientIP 操作人来源地址。
+	ClientIP string `gorm:"column:client_ip;size:64;default:''" json:"clientIp"`
+	// GuacConnectionID guacd 连接标识（保留兼容旧数据，新链路不再写入）。
+	GuacConnectionID string `gorm:"column:guac_connection_id;size:128;default:''" json:"guacConnectionId"`
 	// Status 状态：active / closed / failed。
 	Status string `gorm:"column:status;size:16" json:"status"`
+	// CloseReason 断开原因（正常 / 错误信息 / 服务重启中断）。
+	CloseReason string `gorm:"column:close_reason;size:255;default:''" json:"closeReason"`
+	// RecordingPath 录像相对路径（.guac 指令流，相对录像根目录）。
+	RecordingPath string `gorm:"column:recording_path;size:512;default:''" json:"recordingPath"`
+	// BytesIn 从客户端收到的字节数。
+	BytesIn int64 `gorm:"column:bytes_in;default:0" json:"bytesIn"`
+	// BytesOut 发送给客户端的字节数。
+	BytesOut int64 `gorm:"column:bytes_out;default:0" json:"bytesOut"`
+	// DurationSec 持续时长（秒）：冗余存储，便于列表直接排序与筛选。
+	DurationSec int64 `gorm:"column:duration_sec;default:0" json:"durationSec"`
 	// StartedAt 开始时间。
 	StartedAt time.Time `gorm:"column:started_at" json:"startedAt"`
 	// EndedAt 结束时间（进行中为空）。

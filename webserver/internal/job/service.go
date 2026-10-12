@@ -2,13 +2,10 @@ package job
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,19 +17,18 @@ import (
 
 // Service 提供计划任务的调度、管理与执行能力。
 type Service struct {
-	db          *gorm.DB
-	webDB       *gorm.DB
-	cron        *cron.Cron
-	entries     map[uint]cron.EntryID
-	mu          sync.RWMutex
+	db           *gorm.DB
+	webDB        *gorm.DB
+	cron         *cron.Cron
+	entries      map[uint]cron.EntryID
+	mu           sync.RWMutex
 	taskRegistry map[string]TaskFunc
-	influxURL   string
-	influxToken string
-	influxOrg   string
+	influxURL    string
+	influxToken  string
+	influxOrg    string
 	influxBucket string
-	sqlitePath  string
-	pgConfig    PostgresConfig
-	backupDir   string
+	pgConfig     PostgresConfig
+	backupDir    string
 }
 
 // PostgresConfig PostgreSQL 连接配置。
@@ -49,10 +45,13 @@ type PostgresConfig struct {
 type TaskFunc func(ctx context.Context, svc *Service) (string, error)
 
 // New 创建计划任务服务。
-func New(db, webDB *gorm.DB, influxURL, influxToken, influxOrg, influxBucket, sqlitePath string, pg PostgresConfig) *Service {
-	backupDir := "backup"
-	if sqlitePath != "" {
-		backupDir = filepath.Join(filepath.Dir(sqlitePath), "backup")
+//
+// 参数 Parameters:
+//   - backupDir (string): 备份产物目录。旧实现从 sqlite_path 推导同级 backup 目录，
+//     权限库迁到 PostgreSQL 后不再有数据库文件路径，因此改由配置传入。
+func New(db, webDB *gorm.DB, influxURL, influxToken, influxOrg, influxBucket, backupDir string, pg PostgresConfig) *Service {
+	if strings.TrimSpace(backupDir) == "" {
+		backupDir = "data/backup"
 	}
 	s := &Service{
 		db:           db,
@@ -64,7 +63,6 @@ func New(db, webDB *gorm.DB, influxURL, influxToken, influxOrg, influxBucket, sq
 		influxToken:  influxToken,
 		influxOrg:    influxOrg,
 		influxBucket: influxBucket,
-		sqlitePath:   sqlitePath,
 		pgConfig:     pg,
 		backupDir:    backupDir,
 	}
@@ -105,8 +103,24 @@ func (s *Service) registerBuiltinTasks() {
 	s.taskRegistry["cleanInfluxDB"] = taskCleanInfluxDB
 	s.taskRegistry["cleanLoginLog"] = taskCleanLoginLog
 	s.taskRegistry["cleanOperLog"] = taskCleanOperLog
+	s.taskRegistry["cleanAlertData"] = taskCleanAlertData
 	s.taskRegistry["backupSQLite"] = taskBackupSQLite
 	s.taskRegistry["backupPostgres"] = taskBackupPostgres
+}
+
+// RegisterTask 注册一个外部任务实现。
+//
+// 用途：有些任务需要跨模块协作（例如「清理过期远程桌面录像」要调用 remote 服务），
+// 而 job 服务不应反向依赖它们。上层在装配阶段用闭包把依赖包进来即可。
+//
+// 参数 Parameters:
+//   - name (string): 任务名，对应 sa_job.invoke_target。
+//   - fn (TaskFunc): 任务实现。
+func (s *Service) RegisterTask(name string, fn TaskFunc) {
+	if strings.TrimSpace(name) == "" || fn == nil {
+		return
+	}
+	s.taskRegistry[name] = fn
 }
 
 // ---------------------------------------------------------------------------
@@ -157,15 +171,15 @@ func (s *Service) CreateJob(row *Job) error {
 func (s *Service) UpdateJob(row *Job) error {
 	row.UpdatedAt = time.Now()
 	if err := s.db.Model(&Job{}).Where("id = ?", row.ID).Updates(map[string]any{
-		"job_name":       row.Name,
-		"job_group":      row.Group,
-		"invoke_target":  row.InvokeTarget,
+		"job_name":        row.Name,
+		"job_group":       row.Group,
+		"invoke_target":   row.InvokeTarget,
 		"cron_expression": row.CronExpression,
-		"misfire_policy": row.MisfirePolicy,
-		"concurrent":     row.Concurrent,
-		"remark":         row.Remark,
-		"update_by":      row.UpdatedBy,
-		"update_time":    row.UpdatedAt,
+		"misfire_policy":  row.MisfirePolicy,
+		"concurrent":      row.Concurrent,
+		"remark":          row.Remark,
+		"update_by":       row.UpdatedBy,
+		"update_time":     row.UpdatedAt,
 	}).Error; err != nil {
 		return err
 	}
@@ -242,6 +256,27 @@ func (s *Service) ListJobLogs(page, size int, jobName string) ([]JobLog, int64, 
 		return nil, 0, err
 	}
 	return rows, total, nil
+}
+
+// DeleteJobLogs 按主键批量删除任务执行日志（任务日志页面的多选清理）。
+//
+// sa_job_log 没有软删除列，因此这里是真的 DELETE；调用方按 RowsAffected 回报删除条数。
+//
+// 参数 Parameters:
+//   - ids ([]int64): 日志主键列表。
+//
+// 返回 Returns:
+//   - removed (int64): 实际删除的条数。
+//   - err (error): 删除失败时返回非 nil。
+func (s *Service) DeleteJobLogs(ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	result := s.db.Where("id IN ?", ids).Delete(&JobLog{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
 }
 
 // CleanJobLogs 清空任务执行日志。
@@ -346,10 +381,10 @@ func taskCleanInfluxDB(ctx context.Context, svc *Service) (string, error) {
 	return fmt.Sprintf("已清理 InfluxDB %d 天前的数据", retentionDays), nil
 }
 
-// taskCleanLoginLog 清理登录日志（sa_system_login_log 表，在 SQLite 中）。
+// taskCleanLoginLog 清理登录日志（sa_system_login_log 表，在权限库 PostgreSQL 中）。
 func taskCleanLoginLog(ctx context.Context, svc *Service) (string, error) {
 	if svc.webDB == nil {
-		return "", fmt.Errorf("webDB 未初始化，无法清理 SQLite 登录日志")
+		return "", fmt.Errorf("webDB 未初始化，无法清理登录日志")
 	}
 	retentionDays := 30
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
@@ -360,10 +395,10 @@ func taskCleanLoginLog(ctx context.Context, svc *Service) (string, error) {
 	return fmt.Sprintf("已清理 %d 天前的登录日志，影响 %d 条", retentionDays, result.RowsAffected), nil
 }
 
-// taskCleanOperLog 清理操作日志（sa_system_oper_log 表，在 SQLite 中）。
+// taskCleanOperLog 清理操作日志（sa_system_oper_log 表，在权限库 PostgreSQL 中）。
 func taskCleanOperLog(ctx context.Context, svc *Service) (string, error) {
 	if svc.webDB == nil {
-		return "", fmt.Errorf("webDB 未初始化，无法清理 SQLite 操作日志")
+		return "", fmt.Errorf("webDB 未初始化，无法清理操作日志")
 	}
 	retentionDays := 30
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
@@ -374,274 +409,152 @@ func taskCleanOperLog(ctx context.Context, svc *Service) (string, error) {
 	return fmt.Sprintf("已清理 %d 天前的操作日志，影响 %d 条", retentionDays, result.RowsAffected), nil
 }
 
-// taskBackupSQLite 备份 SQLite 数据库。
+// ---------------------------------------------------------------------------
+// 告警数据保留策略
+// ---------------------------------------------------------------------------
+
+// 告警数据保留策略的配置键（对应 sa_system_config."key"）。
+//
+// 为什么不放在 webserver.yaml：保留天数属于「运维按磁盘水位临时会调」的参数
+// （磁盘吃紧就调小、要留档就调大）。放配置文件意味着每改一次都得重启服务；
+// 放系统配置表则改完立即生效，且与站点名称、上传大小等参数在同一个页面。
+//
+// 注意：这两个键同时硬编码在 internal/app/sql/003_system_seed.sql 的种子数据里
+// （SQL 无法引用 Go 常量），改名必须两边同步，否则配置页改了值而任务读不到。
+const (
+	// ConfigKeyAlertEventsRetentionDays 告警事件（alert_events）保留天数。
+	ConfigKeyAlertEventsRetentionDays = "alert_retention_events_days"
+	// ConfigKeyAlertClosedRetentionDays 已结束告警（alerts）保留天数。
+	ConfigKeyAlertClosedRetentionDays = "alert_retention_alerts_days"
+)
+
+// 保留天数的兜底默认值：配置项缺失（尚未执行到种子 SQL）或取值非法时使用，
+// 与种子数据里的初始值保持一致。
+const (
+	// defaultAlertEventsRetentionDays 告警事件默认保留天数。
+	defaultAlertEventsRetentionDays = 90
+	// defaultAlertClosedRetentionDays 已结束告警默认保留天数。
+	defaultAlertClosedRetentionDays = 180
+)
+
+// taskCleanAlertData 按保留策略清理告警数据。
+//
+// 两条策略互相独立、也可各自关掉：
+//   - alert_retention_events_days（M）：删除 alert_events 中 M 天前的事件；
+//   - alert_retention_alerts_days（N）：删除 alerts 中「已结束」且结束于 N 天前的告警。
+//
+// 为什么只删已结束的告警：closed_at 为空的行是告警状态机的活动输入——告警中心列表、
+// 自动恢复判定、人工确认都依赖它。删掉活动行会让同一条告警在下次评估时被当成全新告警
+// 重新触发（去重键对应的活动行消失了），正是 uk_alerts_active 部分唯一索引要防的事。
+//
+// 取值为 0 或负数表示「该条策略不清理」，这样能只清事件、保留告警头，而不是只能全清或全留。
+//
+// M 与 N 的相互作用值得注意：若 M 大于 N，被删告警的详情时间线会先于告警本身消失；
+// 想让历史告警的完整时间线可回看，把 M 设为不小于 N。
+//
+// 参数 Parameters:
+//   - ctx (context.Context): 上下文（任务级超时由调度层统一控制）。
+//   - svc (*Service): 计划任务服务（提供监控库会话与系统配置读取）。
+//
+// 返回 Returns:
+//   - message (string): 清理结果说明，写入 sa_job_log。
+//   - err (error): 任一策略执行失败时返回非 nil。
+func taskCleanAlertData(ctx context.Context, svc *Service) (string, error) {
+	if svc.db == nil {
+		return "", fmt.Errorf("监控库未初始化，无法清理告警数据")
+	}
+	eventsDays := svc.systemConfigInt(ConfigKeyAlertEventsRetentionDays, defaultAlertEventsRetentionDays)
+	closedDays := svc.systemConfigInt(ConfigKeyAlertClosedRetentionDays, defaultAlertClosedRetentionDays)
+
+	parts := make([]string, 0, 2)
+	if eventsDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -eventsDays)
+		result := svc.db.WithContext(ctx).Exec("DELETE FROM alert_events WHERE created_at < ?", cutoff)
+		if result.Error != nil {
+			return "", fmt.Errorf("清理告警事件失败: %w", result.Error)
+		}
+		parts = append(parts, fmt.Sprintf("告警事件（保留 %d 天）删除 %d 条", eventsDays, result.RowsAffected))
+	} else {
+		parts = append(parts, "告警事件（保留天数为 0，跳过）")
+	}
+
+	if closedDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -closedDays)
+		// 「已结束」的唯一判据是 closed_at 非空，不能用 state 过滤：
+		// 人工确认结束的告警 state 可能仍是 critical（指标确实还超限），
+		// 用 state <> 'ok' 会把这批刚结束的告警漏掉，用 state = 'ok' 又会误删活动告警。
+		result := svc.db.WithContext(ctx).
+			Exec("DELETE FROM alerts WHERE closed_at IS NOT NULL AND closed_at < ?", cutoff)
+		if result.Error != nil {
+			return "", fmt.Errorf("清理已结束告警失败: %w", result.Error)
+		}
+		parts = append(parts, fmt.Sprintf("已结束告警（保留 %d 天）删除 %d 条", closedDays, result.RowsAffected))
+	} else {
+		parts = append(parts, "已结束告警（保留天数为 0，跳过）")
+	}
+
+	return "告警数据清理完成：" + strings.Join(parts, "；"), nil
+}
+
+// systemConfigInt 读取 sa_system_config 中的整型配置项。
+//
+// 读不到就返回兜底值而不是报错：清理任务仅因为一个配置项缺失/写错就整条失败，
+// 会让保留策略彻底停摆、磁盘反而更快写满——这与「保护磁盘」的目标相反。
+//
+// 参数 Parameters:
+//   - key (string): 配置键。
+//   - fallback (int): 读取失败或取值非法时的兜底值。
+//
+// 返回 Returns:
+//   - value (int): 配置值；读不到时为兜底值。
+func (s *Service) systemConfigInt(key string, fallback int) int {
+	if s.webDB == nil {
+		return fallback
+	}
+	var row struct {
+		// Value 配置值；列可为 NULL，故用指针接。
+		Value *string `gorm:"column:value"`
+	}
+	// delete_time IS NULL 必须显式写：这里只查单列、不走 model.SysConfig，
+	// GORM 不会自动补软删除条件。虽然软删除时键会被改写成
+	// 「<原值>#deleted#<id>」而不会命中本查询，但这层过滤成本为零，留着更稳。
+	if err := s.webDB.Table("sa_system_config").
+		Select("value").
+		Where(`"key" = ? AND delete_time IS NULL`, key).
+		Limit(1).
+		Scan(&row).Error; err != nil {
+		slog.Debug("读取告警保留配置失败，使用默认值", "key", key, "fallback", fallback, "err", err)
+		return fallback
+	}
+	if row.Value == nil {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(*row.Value))
+	if err != nil {
+		slog.Warn("告警保留配置取值非法，使用默认值", "key", key, "value", *row.Value, "fallback", fallback)
+		return fallback
+	}
+	return parsed
+}
+
+// taskBackupSQLite 备份权限库。
+//
+// 任务名保留 backupSQLite 是刻意的历史兼容：sa_job 表里可能已有这一行，
+// 改名会让老任务在调度时被当成「未知任务」而静默停止执行。
+//
+// 权限库已从 SQLite 文件迁到 PostgreSQL，并且与监控库同一个 database，
+// 因此这里执行的 PostgreSQL 备份同时覆盖权限数据（sa_system_*）与监控数据。
 func taskBackupSQLite(ctx context.Context, svc *Service) (string, error) {
-	if svc.sqlitePath == "" {
-		return "", fmt.Errorf("sqlite_path 未配置")
-	}
-	if err := os.MkdirAll(svc.backupDir, 0o755); err != nil {
+	message, err := runPostgresBackup(ctx, svc)
+	if err != nil {
 		return "", err
 	}
-	// 年月日 + 4 位随机数，如 webserver_20261007_7391.db
-	timestamp := time.Now().Format("20060102")
-	randNum := strconv.Itoa(1000 + int(time.Now().UnixNano()%9000))
-	dest := filepath.Join(svc.backupDir, fmt.Sprintf("webserver_%s_%s.db", timestamp, randNum))
-
-	// 通过 webDB 执行 SQLite 的 backup API，无需外部 sqlite3 CLI
-	if svc.webDB == nil {
-		return "", fmt.Errorf("webDB 未初始化，无法执行 SQLite 备份")
-	}
-	sqlDB, err := svc.webDB.DB()
-	if err != nil {
-		return "", fmt.Errorf("获取底层 SQL DB 失败: %w", err)
-	}
-
-	// 先执行 checkpoint 确保 WAL 数据落盘
-	if _, err := sqlDB.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return "", fmt.Errorf("wal_checkpoint 失败: %w", err)
-	}
-
-	// 使用 Go 标准库复制数据库文件（此时文件已处于一致状态）
-	srcFile, err := os.Open(svc.sqlitePath)
-	if err != nil {
-		return "", fmt.Errorf("打开源数据库失败: %w", err)
-	}
-	defer srcFile.Close()
-
-	destFile, err := os.Create(dest)
-	if err != nil {
-		return "", fmt.Errorf("创建备份文件失败: %w", err)
-	}
-	defer destFile.Close()
-
-	if _, err := destFile.ReadFrom(srcFile); err != nil {
-		return "", fmt.Errorf("复制数据库文件失败: %w", err)
-	}
-	return fmt.Sprintf("SQLite 已备份到 %s", dest), nil
+	return message + "（权限库与监控库同库，已一并备份）", nil
 }
 
-// taskBackupPostgres 备份 PostgreSQL 数据库。
+// taskBackupPostgres 备份监控库。
+//
+// 与权限库在同一个 database 内，所以这次备份实际上覆盖了全部业务表。
 func taskBackupPostgres(ctx context.Context, svc *Service) (string, error) {
-	pg := svc.pgConfig
-	if err := os.MkdirAll(svc.backupDir, 0o755); err != nil {
-		return "", err
-	}
-	// 年月日 + 4 位随机数，如 postgres_20261007_7391.sql
-	timestamp := time.Now().Format("20060102")
-	randNum := strconv.Itoa(1000 + int(time.Now().UnixNano()%9000))
-	dest := filepath.Join(svc.backupDir, fmt.Sprintf("postgres_%s_%s.sql", timestamp, randNum))
-
-	// 通过底层 *sql.DB 执行 pg_dump 等价的纯 SQL 备份，无需外部 pg_dump CLI
-	sqlDB, err := svc.db.DB()
-	if err != nil {
-		return "", fmt.Errorf("获取底层 SQL DB 失败: %w", err)
-	}
-
-	// 查询所有用户表（排除系统 schema）
-	rows, err := sqlDB.QueryContext(ctx, `
-		SELECT schemaname, tablename
-		FROM pg_tables
-		WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-		ORDER BY schemaname, tablename
-	`)
-	if err != nil {
-		return "", fmt.Errorf("查询表列表失败: %w", err)
-	}
-	defer rows.Close()
-
-	type tableInfo struct {
-		schema string
-		name   string
-	}
-	var tables []tableInfo
-	for rows.Next() {
-		var t tableInfo
-		if err := rows.Scan(&t.schema, &t.name); err != nil {
-			return "", fmt.Errorf("扫描表信息失败: %w", err)
-		}
-		tables = append(tables, t)
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("遍历表列表失败: %w", err)
-	}
-
-	// 创建备份文件
-	f, err := os.Create(dest)
-	if err != nil {
-		return "", fmt.Errorf("创建备份文件失败: %w", err)
-	}
-	defer f.Close()
-
-	// 写入备份头
-	fmt.Fprintf(f, "-- PostgreSQL Backup\n")
-	fmt.Fprintf(f, "-- Database: %s\n", pg.Database)
-	fmt.Fprintf(f, "-- Time: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-
-	// 逐个表导出：先 DROP/CREATE，再 INSERT
-	for _, t := range tables {
-		fullName := fmt.Sprintf("%q.%q", t.schema, t.name)
-		// 查询表数据
-		dataRows, err := sqlDB.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s", fullName))
-		if err != nil {
-			return "", fmt.Errorf("查询表 %s 失败: %w", fullName, err)
-		}
-
-		cols, err := dataRows.Columns()
-		if err != nil {
-			dataRows.Close()
-			return "", fmt.Errorf("获取表 %s 列信息失败: %w", fullName, err)
-		}
-
-		fmt.Fprintf(f, "\n-- Table: %s\n", fullName)
-
-		// 1. DROP TABLE IF EXISTS
-		fmt.Fprintf(f, "DROP TABLE IF EXISTS %s CASCADE;\n", fullName)
-
-		// 2. 获取 CREATE TABLE 语句
-		var createSQL string
-		if err := sqlDB.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT pg_catalog.pg_get_tabledef(%q::regclass::oid, true, true)", fullName),
-		).Scan(&createSQL); err != nil {
-			// pg_get_tabledef 可能不存在，回退到 information_schema 方式
-			createSQL, err = buildCreateTableSQL(ctx, sqlDB, t.schema, t.name)
-			if err != nil {
-				return "", fmt.Errorf("生成表 %s 建表语句失败: %w", fullName, err)
-			}
-		}
-		fmt.Fprintf(f, "%s;\n", createSQL)
-
-		// 3. 导出 INSERT 语句
-		values := make([]any, len(cols))
-		valuePtrs := make([]any, len(cols))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-
-		for dataRows.Next() {
-			if err := dataRows.Scan(valuePtrs...); err != nil {
-				dataRows.Close()
-				return "", fmt.Errorf("扫描表 %s 数据失败: %w", fullName, err)
-			}
-
-			fmt.Fprintf(f, "INSERT INTO %s (", fullName)
-			for i, col := range cols {
-				if i > 0 {
-					fmt.Fprint(f, ", ")
-				}
-				fmt.Fprintf(f, "%q", col)
-			}
-			fmt.Fprint(f, ") VALUES (")
-			for i, v := range values {
-				if i > 0 {
-					fmt.Fprint(f, ", ")
-				}
-				switch val := v.(type) {
-				case nil:
-					fmt.Fprint(f, "NULL")
-				case []byte:
-					s := string(val)
-					fmt.Fprintf(f, "'%s'", escapeSQLString(s))
-				case string:
-					fmt.Fprintf(f, "'%s'", escapeSQLString(val))
-				case time.Time:
-					fmt.Fprintf(f, "'%s'", val.Format("2006-01-02 15:04:05"))
-				case bool:
-					if val {
-						fmt.Fprint(f, "true")
-					} else {
-						fmt.Fprint(f, "false")
-					}
-				default:
-					fmt.Fprintf(f, "%v", val)
-				}
-			}
-			fmt.Fprintln(f, ");")
-		}
-		dataRows.Close()
-		if err := dataRows.Err(); err != nil {
-			return "", fmt.Errorf("遍历表 %s 数据失败: %w", fullName, err)
-		}
-	}
-
-	return fmt.Sprintf("PostgreSQL 已备份到 %s", dest), nil
-}
-
-// buildCreateTableSQL 通过 information_schema 生成 CREATE TABLE 语句。
-func buildCreateTableSQL(ctx context.Context, db *sql.DB, schema, table string) (string, error) {
-	// 查询列信息
-	colRows, err := db.QueryContext(ctx, `
-		SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable, column_default
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position
-	`, schema, table)
-	if err != nil {
-		return "", err
-	}
-	defer colRows.Close()
-
-	var cols []string
-	for colRows.Next() {
-		var colName, dataType, isNullable string
-		var maxLen, numPrec, numScale sql.NullInt64
-		var colDefault sql.NullString
-		if err := colRows.Scan(&colName, &dataType, &maxLen, &numPrec, &numScale, &isNullable, &colDefault); err != nil {
-			return "", err
-		}
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "    %q %s", colName, dataType)
-		if maxLen.Valid && maxLen.Int64 > 0 {
-			fmt.Fprintf(&sb, "(%d)", maxLen.Int64)
-		} else if numPrec.Valid {
-			if numScale.Valid && numScale.Int64 > 0 {
-				fmt.Fprintf(&sb, "(%d,%d)", numPrec.Int64, numScale.Int64)
-			} else {
-				fmt.Fprintf(&sb, "(%d)", numPrec.Int64)
-			}
-		}
-		if isNullable == "NO" {
-			sb.WriteString(" NOT NULL")
-		}
-		if colDefault.Valid {
-			fmt.Fprintf(&sb, " DEFAULT %s", colDefault.String)
-		}
-		cols = append(cols, sb.String())
-	}
-	if err := colRows.Err(); err != nil {
-		return "", err
-	}
-
-	// 查询主键
-	pkRows, err := db.QueryContext(ctx, `
-		SELECT kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-		WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1 AND tc.table_name = $2
-		ORDER BY kcu.ordinal_position
-	`, schema, table)
-	if err != nil {
-		return "", err
-	}
-	defer pkRows.Close()
-
-	var pks []string
-	for pkRows.Next() {
-		var col string
-		if err := pkRows.Scan(&col); err != nil {
-			return "", err
-		}
-		pks = append(pks, fmt.Sprintf("%q", col))
-	}
-	if len(pks) > 0 {
-		cols = append(cols, fmt.Sprintf("    PRIMARY KEY (%s)", strings.Join(pks, ", ")))
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "CREATE TABLE %q.%q (\n%s\n)", schema, table, strings.Join(cols, ",\n"))
-	return sb.String(), nil
-}
-
-// escapeSQLString 转义 SQL 字符串中的单引号。
-func escapeSQLString(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
+	return runPostgresBackup(ctx, svc)
 }

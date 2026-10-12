@@ -69,7 +69,7 @@ func main() {
 			slog.Error("gRPC Collector stopped", "error", err)
 		}
 	}()
-	httpServer := &http.Server{Addr: ":8080", Handler: api.New(store).Handler()}
+	httpServer := &http.Server{Addr: cfg.HTTPAddress, Handler: api.New(store).Handler()}
 	go func() {
 		colorLog("\x1b[35m", "HTTPS management API listening address="+httpServer.Addr)
 		if err := httpServer.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil && err != http.ErrServerClosed {

@@ -131,8 +131,10 @@ func (l *LogLogic) Trend(startText, endText string) (dto.VisitTrendDetail, error
 	startAt := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.Local)
 	endAt := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, 1)
 	var points []trendPoint
+	// 用 to_char 而不是 date()：SQLite 的 date() 在 PostgreSQL 里虽然能解析，
+	// 但返回的是 date 类型，扫进 Go 的 string 字段会失败；显式转成字符串最稳妥。
 	err := l.db.Model(&model.SysLoginLog{}).
-		Select("date(login_time) AS day, COUNT(*) AS pv, COUNT(DISTINCT username) AS uv").
+		Select("to_char(login_time, 'YYYY-MM-DD') AS day, COUNT(*) AS pv, COUNT(DISTINCT username) AS uv").
 		Where("login_time >= ? AND login_time < ?", startAt, endAt).
 		Group("day").Order("day").Scan(&points).Error
 	if err != nil {

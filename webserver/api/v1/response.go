@@ -154,12 +154,21 @@ func TimeRange(c *gin.Context, field string) (start, end *time.Time) {
 
 // ClientIP 提取客户端 IP，兼容反向代理场景。
 //
+// 优先取防护中间件解析并写入上下文的来源 IP：是否信任 X-Forwarded-For / X-Real-IP
+// 由 protection.trust_proxy_headers 决定。直连部署时若在此处无条件信任代理头，
+// 客户端只要伪造该头就能绕开 IP 维度限流与登录失败锁定。
+//
 // 参数 Parameters:
 //   - c (*gin.Context): 当前请求上下文。
 //
 // 返回 Returns:
 //   - ip (string): 客户端 IP。
 func ClientIP(c *gin.Context) string {
+	if value, ok := c.Get(util.ContextClientIPKey); ok {
+		if ip, ok := value.(string); ok && ip != "" {
+			return ip
+		}
+	}
 	if forwarded := c.GetHeader("X-Forwarded-For"); forwarded != "" {
 		if index := strings.IndexByte(forwarded, ','); index > 0 {
 			return strings.TrimSpace(forwarded[:index])

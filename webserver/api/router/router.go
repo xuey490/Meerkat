@@ -21,6 +21,8 @@ import (
 
 // Deps 是装配路由所需的依赖集合。
 type Deps struct {
+	// Protection HTTP 限流与黑名单防护。
+	Protection middleware.ProtectionConfig
 	// Auth 认证控制器。
 	Auth *v1.AuthAPI
 	// Users 用户控制器。
@@ -51,6 +53,8 @@ type Deps struct {
 	Monitor *v1.MonitorAPI
 	// Remote 远程运维控制器（SSH/RDP/操作审计）。
 	Remote *v1.RemoteAPI
+	// AlertRules 资源告警规则控制器（CPU/内存/负载/磁盘阈值，三层作用域）。
+	AlertRules *v1.AlertRuleAPI
 	// DangerousCommand 高危命令规则控制器。
 	DangerousCommand *v1.DangerousCommandAPI
 	// Job 计划任务控制器。
@@ -104,6 +108,7 @@ func New(deps Deps) *gin.Engine {
 	}
 	// XSRF：写方法校验 Origin / Referer；本系统用 Bearer 令牌，无 Cookie 自动携带面。
 	engine.Use(middleware.CSRF(deps.CSRFConfig))
+	engine.Use(middleware.Protection(deps.Protection))
 	// 演示模式：放在鉴权之前，直接拦掉写操作，避免无谓的令牌解析与审计写入。
 	engine.Use(middleware.DemoMode(deps.DemoEnabled, deps.DemoWhitelist))
 	engine.Use(middleware.AccessLog(deps.AccessLog, deps.Print))
@@ -139,7 +144,7 @@ func New(deps Deps) *gin.Engine {
 		deps.Posts.Register, deps.Dicts.Register, deps.Configs.Register, deps.Notices.Register,
 		deps.Logs.Register, deps.Attachments.Register, deps.Caches.Register,
 		deps.Online.Register, deps.Monitor.Register, deps.Remote.Register,
-		deps.DangerousCommand.Register, deps.Job.Register, deps.JobLog.Register,
+		deps.AlertRules.Register, deps.DangerousCommand.Register, deps.Job.Register, deps.JobLog.Register,
 	} {
 		if register == nil {
 			continue
@@ -151,6 +156,8 @@ func New(deps Deps) *gin.Engine {
 	// ticket 鉴权（先 POST /monitor/ssh/ticket 换取），因此挂在全局 engine 层。
 	if deps.Remote != nil {
 		engine.GET("/api/v1/monitor/ssh/ws", deps.Remote.SSHWebSocket)
+		// 远程桌面（RDP / VNC）WebSocket：与 SSH 同层，同样靠一次性 ticket 鉴权。
+		engine.GET("/api/v1/monitor/rdp/ws", deps.Remote.RDPWebSocket)
 	}
 
 	// 附件静态访问：/upload/... 直出本地文件，供 <img>/<a> 等直接引用。

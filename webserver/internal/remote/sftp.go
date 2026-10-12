@@ -110,6 +110,27 @@ func (c *SftpClient) Remove(remotePath string) error {
 	return c.sftp.Remove(remotePath)
 }
 
+// ReadFile 读取远程文件全部内容。
+func (c *SftpClient) ReadFile(remotePath string) ([]byte, error) {
+	f, err := c.sftp.Open(remotePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// WriteFile 将数据写入远程文件（覆盖写入）。
+func (c *SftpClient) WriteFile(remotePath string, data []byte) error {
+	f, err := c.sftp.Create(remotePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(data)
+	return err
+}
+
 // SFTPListDir 为指定资产列出远程目录（独立建连、用完即关）。
 func (s *Service) SFTPListDir(agentID, dir string) ([]SftpFileInfo, error) {
 	host, port, username, authType, secret, passphrase, err := s.SSHCredentials(agentID)
@@ -150,4 +171,32 @@ func (s *Service) SFTPRemove(agentID, remotePath string) error {
 	}
 	defer client.Close()
 	return client.Remove(remotePath)
+}
+
+// SFTPRead 为指定资产读取远程文件内容。
+func (s *Service) SFTPRead(agentID, remotePath string) ([]byte, error) {
+	host, port, username, authType, secret, passphrase, err := s.SSHCredentials(agentID)
+	if err != nil {
+		return nil, err
+	}
+	client, err := DialSFTP(host, port, username, authType, secret, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	return client.ReadFile(remotePath)
+}
+
+// SFTPWrite 为指定资产将内容写入远程文件（覆盖写入）。
+func (s *Service) SFTPWrite(agentID, remotePath string, data []byte) error {
+	host, port, username, authType, secret, passphrase, err := s.SSHCredentials(agentID)
+	if err != nil {
+		return err
+	}
+	client, err := DialSFTP(host, port, username, authType, secret, passphrase)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	return client.WriteFile(remotePath, data)
 }

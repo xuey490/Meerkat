@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -28,11 +27,13 @@ import (
 	"github.com/company/monitor-webserver/internal/eventhub"
 	"github.com/company/monitor-webserver/internal/iploc"
 	"github.com/company/monitor-webserver/internal/job"
+	"github.com/company/monitor-webserver/internal/loginguard"
 	"github.com/company/monitor-webserver/internal/logic"
 	"github.com/company/monitor-webserver/internal/logx"
 	"github.com/company/monitor-webserver/internal/monitor"
 	"github.com/company/monitor-webserver/internal/permission"
 	"github.com/company/monitor-webserver/internal/remote"
+	"github.com/company/monitor-webserver/internal/resourcealert"
 	"github.com/company/monitor-webserver/internal/service"
 	"github.com/company/monitor-webserver/internal/session"
 	"github.com/company/monitor-webserver/pkg/redisx"
@@ -44,7 +45,7 @@ type App struct {
 	cfg Config
 	// log zap 日志器（控制台 + logs 目录），由 logx.Setup 装配。
 	log *zap.Logger
-	// webDB 权限库：SQLite（sa_system_*）。
+	// webDB 权限库：PostgreSQL（sa_system_*，与监控库同实例同库）。
 	webDB *gorm.DB
 	// monitorDB 监控库：PostgreSQL（agents/alerts/...）。
 	monitorDB *gorm.DB
@@ -68,6 +69,8 @@ type App struct {
 	businessCache *cachestore.Store
 	// locations IP 归属地查询器（登录地点、在线用户、操作日志）。
 	locations *iploc.Resolver
+	// resourceAlert 资源告警服务（CPU/内存/负载/磁盘持续超阈值 → 日志 + 告警中心）。
+	resourceAlert *resourcealert.Service
 }
 
 // New 构建 App：打开两套数据库、执行权限库迁移与种子、装配服务与路由。
@@ -84,7 +87,8 @@ func New(cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepathDir(cfg.SQLitePath), 0o755); err != nil {
+	// 备份目录随启动创建：计划任务的备份产物落在这里，缺目录会导致备份失败。
+	if err := os.MkdirAll(cfg.BackupDir, 0o755); err != nil {
 		_ = zapLog.Sync()
 		return nil, err
 	}
@@ -103,24 +107,26 @@ func New(cfg Config) (*App, error) {
 		_ = zapLog.Sync()
 		return nil, err
 	}
-	webDB, err := gorm.Open(sqlite.Open(sqliteDSN(cfg.SQLitePath)), &gorm.Config{Logger: gormLogger()})
+	// 权限库与监控库同属一个 PostgreSQL 实例（同一 database，靠表名前缀区分），
+	// 但仍保留两个独立的 gorm.DB：连接池可各自调优，将来要物理分离只需改配置。
+	webDB, err := gorm.Open(postgres.Open(postgresDSN(cfg.Postgres)), &gorm.Config{Logger: gormLogger()})
 	if err != nil {
 		_ = zapLog.Sync()
 		return nil, err
 	}
-	sqlDB, err := webDB.DB()
+	webSQLDB, err := webDB.DB()
 	if err != nil {
 		_ = zapLog.Sync()
 		return nil, err
 	}
-	// SQLite 单写者模型：限制连接数并设置忙等待，避免并发写入直接报 database is locked。
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	// 并发不再被锁死：原 SQLite 实现把连接数限制为 1，所有请求串行排队，
+	// 并发一高就撞 busy_timeout 报 database is locked。PostgreSQL 支持真正的并发连接，
+	// 这里按配置放开连接池（默认 20 个连接 / 5 个空闲 / 1800s 存活）。
+	webSQLDB.SetMaxOpenConns(cfg.Postgres.MaxOpenConns)
+	webSQLDB.SetMaxIdleConns(cfg.Postgres.MaxIdleConns)
+	webSQLDB.SetConnMaxLifetime(time.Duration(cfg.Postgres.ConnMaxLifetimeSeconds) * time.Second)
 
-	monitorDSN := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Postgres.Host, cfg.Postgres.Port, cfg.Postgres.User, cfg.Postgres.Password,
-		cfg.Postgres.Database, cfg.Postgres.SSLMode)
-	monitorDB, err := gorm.Open(postgres.Open(monitorDSN), &gorm.Config{Logger: gormLogger()})
+	monitorDB, err := gorm.Open(postgres.Open(postgresDSN(cfg.Postgres)), &gorm.Config{Logger: gormLogger()})
 	if err != nil {
 		_ = zapLog.Sync()
 		return nil, err
@@ -135,14 +141,24 @@ func New(cfg Config) (*App, error) {
 		events:    eventhub.New(),
 		monitor:   monitor.New(monitorDB, influxdb2.NewClient(cfg.Influx.URL, cfg.Influx.Token), cfg.Influx.Organization, cfg.Influx.Bucket),
 	}
-	// 远程运维服务：SSH/RDP 连接配置与会话审计。Guacamole 未启用时为 nil。
-	var guac *remote.GuacamoleClient
-	if cfg.Guacamole.Enabled {
-		guac = remote.NewGuacamoleClient(cfg.Guacamole.BaseURL, cfg.Guacamole.Username, cfg.Guacamole.Password, cfg.Guacamole.DataSource)
+	// 远程运维服务：SSH 终端与会话审计 + RDP/VNC 远程桌面（经 guacd）。
+	// 远程桌面未启用时 guac.Client 为 nil，相关入口对前端隐藏。
+	guacOptions := remote.GuacOptions{
+		LocalRecordingDir: cfg.Guac.LocalRecordingDir,
+		HandshakeTimeout:  time.Duration(cfg.Guac.HandshakeTimeoutSeconds) * time.Second,
+		IdleTimeout:       time.Duration(cfg.Guac.IdleTimeoutSeconds) * time.Second,
 	}
-	app.remote = remote.New(monitorDB, cfg.Remote.SecretKey, recordingDir, guac)
+	if cfg.Guac.Enabled {
+		guacOptions.Client = remote.NewGuacdClient(
+			cfg.Guac.Address,
+			time.Duration(cfg.Guac.ConnectTimeoutSeconds)*time.Second,
+			cfg.Guac.RecordingEnabled,
+			cfg.Guac.RecordingDirInGuacd,
+		)
+	}
+	app.remote = remote.New(monitorDB, cfg.Remote.SecretKey, recordingDir, guacOptions)
 	app.jobSvc = job.New(monitorDB, webDB, cfg.Influx.URL, cfg.Influx.Token, cfg.Influx.Organization, cfg.Influx.Bucket,
-		cfg.SQLitePath, job.PostgresConfig{
+		cfg.BackupDir, job.PostgresConfig{
 			Host: cfg.Postgres.Host, Port: cfg.Postgres.Port, User: cfg.Postgres.User,
 			Password: cfg.Postgres.Password, Database: cfg.Postgres.Database, SSLMode: cfg.Postgres.SSLMode,
 		})
@@ -155,6 +171,25 @@ func New(cfg Config) (*App, error) {
 		app.Close()
 		return nil, err
 	}
+	// 远程桌面对账：进程被强杀时 defer 不会执行，会把会话永久留在 active，
+	// 让审计列表看起来永远有会话在进行中。启动时修正一次。
+	if affected, err := app.remote.ReconcileOrphanSessions(); err != nil {
+		zapLog.Warn("修正遗留的远程桌面会话失败", zap.Error(err))
+	} else if affected > 0 {
+		zapLog.Info("已修正遗留的远程桌面会话", zap.Int64("count", affected))
+	}
+	// 远程桌面录像的保留清理：需要访问 remote 服务，因此在装配阶段以闭包注册。
+	// 对应 sa_job 里 invoke_target = cleanGuacRecordings 的记录（可在「计划任务」页配置周期）。
+	app.jobSvc.RegisterTask("cleanGuacRecordings", func(_ context.Context, _ *job.Service) (string, error) {
+		removed, err := app.remote.CleanupRecordings(cfg.Guac.RetentionDays)
+		if err != nil {
+			return "", err
+		}
+		if removed == 0 {
+			return "没有需要清理的远程桌面录像", nil
+		}
+		return fmt.Sprintf("已清理过期远程桌面录像 %d 个", removed), nil
+	})
 	if err := app.jobSvc.Migrate(); err != nil {
 		app.Close()
 		return nil, err
@@ -163,6 +198,20 @@ func New(cfg Config) (*App, error) {
 		app.Close()
 		return nil, err
 	}
+	// 资源告警：规则表与告警表建在监控库上（与 collector 同库），评估协程常驻。
+	alertStore := resourcealert.NewStore(monitorDB)
+	alertService, alertErr := resourcealert.New(alertStore, app.influx,
+		cfg.Influx.Organization, cfg.Influx.Bucket, app.events, cfg.Alert.ToOptions(), slog.Default())
+	if alertErr != nil {
+		app.Close()
+		return nil, alertErr
+	}
+	app.resourceAlert = alertService
+	if err := app.resourceAlert.Migrate(); err != nil {
+		app.Close()
+		return nil, err
+	}
+	app.resourceAlert.Start()
 	// 放在 migrate 之后：此后的 New 无错误返回路径，避免清理协程泄漏。
 	app.captcha = captcha.New(cfg.Captcha.Length,
 		time.Duration(cfg.Captcha.TTLSeconds)*time.Second, cfg.Captcha.MaxItems)
@@ -191,6 +240,36 @@ func (a *App) newBusinessCache() *cachestore.Store {
 	}
 	return cachestore.New(client, a.cfg.Cache.Prefix,
 		time.Duration(a.cfg.Cache.TTLSeconds)*time.Second)
+}
+
+// newLoginGuard 创建登录失败锁定守卫：账号与来源 IP 两个维度的失败计数存缓存，
+// 计数键 TTL 即锁定时长，到期自动解锁（无需巡检任务）。
+//
+// 存储优先级：业务缓存（cache.enabled=true）→ 单独的 Redis / 进程内缓存。
+// 即 cache.enabled=false 但 redis.enabled=true 时，锁定仍存 Redis（多实例共享）。
+//
+// 返回 Returns:
+//   - guard (*loginguard.Guard): 登录锁定守卫。
+func (a *App) newLoginGuard() *loginguard.Guard {
+	lockout := time.Duration(a.cfg.Protection.LockoutMinutes) * time.Minute
+	store := a.businessCache
+	if store == nil {
+		var client *redis.Client
+		if a.cfg.Redis.Enabled {
+			client = redisx.NewClient(redisx.Config{
+				Addr:     a.cfg.Redis.Addr,
+				Username: a.cfg.Redis.Username,
+				Password: a.cfg.Redis.Password,
+				DB:       a.cfg.Redis.DB,
+			})
+		}
+		store = cachestore.New(client, a.cfg.Cache.Prefix, lockout)
+	}
+	return loginguard.New(store, loginguard.Options{
+		Limit:   a.cfg.Protection.LoginFailureLimit,
+		Lockout: lockout,
+		LockIP:  a.cfg.ProtectionLockoutIP(),
+	})
 }
 
 // newIPLocator 创建 IP 归属地查询器（结果写入业务缓存，便于在缓存管理页查看与清理）。
@@ -246,7 +325,7 @@ func (a *App) newRouter() *gin.Engine {
 		Secret:        a.cfg.JWT.Secret,
 		AccessSeconds: a.cfg.JWT.AccessSeconds,
 		RefreshDays:   a.cfg.JWT.RefreshDays,
-	}, a.locations, sessionGuard)
+	}, a.locations, sessionGuard, a.newLoginGuard())
 	userService := service.NewUserService(userLogic, deptLogic, perms)
 	roleService := service.NewRoleService(roleLogic, perms)
 	deptService := service.NewDeptService(deptLogic)
@@ -274,31 +353,42 @@ func (a *App) newRouter() *gin.Engine {
 		Height:  a.cfg.Captcha.Height,
 	})
 	return apiRouter.New(apiRouter.Deps{
-		Auth:            authAPI,
-		Users:           v1.NewUserAPI(userService),
-		Roles:           v1.NewRoleAPI(roleService),
-		Depts:           v1.NewDeptAPI(deptService),
-		Menus:           v1.NewMenuAPI(menuService),
-		Posts:           v1.NewPostAPI(postService),
-		Dicts:           v1.NewDictAPI(dictService),
-		Configs:         v1.NewConfigAPI(configService),
-		Notices:         v1.NewNoticeAPI(noticeService),
-		Logs:            v1.NewLogAPI(logService),
-		Attachments:     v1.NewAttachmentAPI(attachmentService),
-		Caches:          v1.NewCacheAPI(cacheService),
-		Online:          v1.NewOnlineAPI(onlineService),
-		UploadDir:       a.cfg.Upload.Dir,
-		UploadURLPrefix: a.cfg.Upload.URLPrefix,
+		Protection: middleware.ProtectionConfig{
+			Enabled:           a.cfg.Protection.Enabled,
+			APIRequests:       a.cfg.Protection.APIRequests,
+			APIWindow:         time.Duration(a.cfg.Protection.APIWindowSeconds) * time.Second,
+			LoginRequests:     a.cfg.Protection.LoginRequests,
+			LoginWindow:       time.Duration(a.cfg.Protection.LoginWindowSeconds) * time.Second,
+			Blacklist:         a.cfg.Protection.Blacklist,
+			Whitelist:         a.cfg.Protection.Whitelist,
+			TrustProxyHeaders: a.cfg.Protection.TrustProxyHeaders,
+		},
+		Auth:             authAPI,
+		Users:            v1.NewUserAPI(userService),
+		Roles:            v1.NewRoleAPI(roleService),
+		Depts:            v1.NewDeptAPI(deptService),
+		Menus:            v1.NewMenuAPI(menuService),
+		Posts:            v1.NewPostAPI(postService),
+		Dicts:            v1.NewDictAPI(dictService),
+		Configs:          v1.NewConfigAPI(configService),
+		Notices:          v1.NewNoticeAPI(noticeService),
+		Logs:             v1.NewLogAPI(logService),
+		Attachments:      v1.NewAttachmentAPI(attachmentService),
+		Caches:           v1.NewCacheAPI(cacheService),
+		Online:           v1.NewOnlineAPI(onlineService),
+		UploadDir:        a.cfg.Upload.Dir,
+		UploadURLPrefix:  a.cfg.Upload.URLPrefix,
 		Monitor:          v1.NewMonitorAPI(a.monitor, a.events),
 		Remote:           v1.NewRemoteAPI(a.remote),
+		AlertRules:       v1.NewAlertRuleAPI(a.resourceAlert),
 		DangerousCommand: v1.NewDangerousCommandAPI(a.remote),
 		Job:              v1.NewJobAPI(a.jobSvc),
 		JobLog:           v1.NewJobLogAPI(a.jobSvc),
-		AuthService:     authService,
-		Perms:           perms,
-		OperateLog:      middleware.OperateLog(a.webDB, a.locations),
-		AccessLog:       a.cfg.AccessLog,
-		Print:           a.printAccessLog,
+		AuthService:      authService,
+		Perms:            perms,
+		OperateLog:       middleware.OperateLog(a.webDB, a.locations),
+		AccessLog:        a.cfg.AccessLog,
+		Print:            a.printAccessLog,
 		// 安全中间件：CORS 复用 pkg/middleware 的原版组件。
 		CORSConfig:    a.cfg.Middleware.CORS,
 		CSRFConfig:    middleware.CSRFConfig{Enabled: a.cfg.XSRFEnabled(), AllowOrigins: a.cfg.XSRFAllowOrigins()},
@@ -391,28 +481,23 @@ func gormLogger() logger.Interface {
 	})
 }
 
-// sqliteDSN 为 SQLite 连接串追加 WAL、忙等待等 pragma。
+// postgresDSN 拼装 PostgreSQL 连接串。
 //
 // 参数 Parameters:
-//   - path (string): 数据库文件路径。
+//   - cfg (PostgresConfig): 连接配置。
 //
 // 返回 Returns:
-//   - dsn (string): 供 glebarez/sqlite 使用的连接串。
-func sqliteDSN(path string) string {
-	separator := "?"
-	if strings.Contains(path, "?") {
-		separator = "&"
-	}
-	pragmas := []string{
-		"_pragma=busy_timeout(10000)",
-		"_pragma=journal_mode(WAL)",
-		"_pragma=synchronous(NORMAL)",
-	}
-	return path + separator + strings.Join(pragmas, "&")
+//   - dsn (string): 供 gorm.io/driver/postgres 使用的连接串。
+func postgresDSN(cfg PostgresConfig) string {
+	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=%s",
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.SSLMode, cfg.TimeZone)
 }
 
 // Close 释放时序库客户端、验证码清理协程、Redis 连接与计划任务调度器（幂等）。
 func (a *App) Close() {
+	if a.resourceAlert != nil {
+		a.resourceAlert.Stop()
+	}
 	if a.jobSvc != nil {
 		a.jobSvc.Stop()
 	}
@@ -461,19 +546,4 @@ func (a *App) RunEventPublisher(ctx context.Context) {
 			a.events.Publish(eventhub.TopicMonitorAgentStatus, overview)
 		}
 	}
-}
-
-// filepathDir 返回文件路径的目录部分，用于创建数据目录。
-//
-// 参数 Parameters:
-//   - path (string): 文件路径。
-//
-// 返回 Returns:
-//   - dir (string): 目录路径；不含分隔符时返回 "."。
-func filepathDir(path string) string {
-	index := strings.LastIndexAny(path, `/\`)
-	if index < 0 {
-		return "."
-	}
-	return path[:index]
 }

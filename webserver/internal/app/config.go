@@ -6,12 +6,47 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/company/monitor-webserver/internal/resourcealert"
 	"github.com/company/monitor-webserver/pkg/logger"
 	pkgmiddleware "github.com/company/monitor-webserver/pkg/middleware"
 )
+
+// PostgresConfig 是 PostgreSQL 连接配置。
+//
+// 权限库与监控库共用同一份连接参数：两者在同一个 database 内靠表名前缀区分
+// （sa_system_* 为权限与治理数据，agents/alerts/... 为监控数据）。
+type PostgresConfig struct {
+	// Host 主机。
+	Host string `yaml:"host"`
+	// Port 端口。
+	Port int `yaml:"port"`
+	// User 用户名。
+	User string `yaml:"user"`
+	// Password 密码。
+	Password string `yaml:"password"`
+	// Database 库名。
+	Database string `yaml:"database"`
+	// SSLMode SSL 模式。
+	SSLMode string `yaml:"ssl_mode"`
+	// TimeZone 会话时区；默认 Asia/Shanghai。
+	//
+	// 种子 SQL 用 localtimestamp 写入本地时间，GORM 写 *time.Time 也要用同一时间基准，
+	// 不统一的话同一列会混进两种时区的时间。
+	TimeZone string `yaml:"timezone"`
+	// MaxOpenConns 权限库最大连接数；默认 20。
+	//
+	// 这是本次迁移的核心收益：原 SQLite 实现把连接数强制限制为 1，所有请求串行排队，
+	// 并发一高就报 database is locked。
+	MaxOpenConns int `yaml:"max_open_conns"`
+	// MaxIdleConns 权限库空闲连接数；默认 5。
+	MaxIdleConns int `yaml:"max_idle_conns"`
+	// ConnMaxLifetimeSeconds 连接最长存活秒数；默认 1800。
+	ConnMaxLifetimeSeconds int `yaml:"conn_max_lifetime_seconds"`
+}
 
 // Config 是 webserver.yaml 的映射结构。
 type Config struct {
@@ -19,23 +54,32 @@ type Config struct {
 	HTTPAddress string `yaml:"http_address"`
 	// AccessLog 是否打印每次请求的完整地址与耗时。
 	AccessLog bool `yaml:"access_log"`
-	// SQLitePath 权限库文件路径。
-	SQLitePath string `yaml:"sqlite_path"`
-	// Postgres 监控库（PostgreSQL）连接配置。
-	Postgres struct {
-		// Host 主机。
-		Host string `yaml:"host"`
-		// Port 端口。
-		Port int `yaml:"port"`
-		// User 用户名。
-		User string `yaml:"user"`
-		// Password 密码。
-		Password string `yaml:"password"`
-		// Database 库名。
-		Database string `yaml:"database"`
-		// SSLMode SSL 模式。
-		SSLMode string `yaml:"ssl_mode"`
-	} `yaml:"postgres"`
+	// Protection HTTP 限流、黑名单与登录锁定配置。
+	Protection struct {
+		Enabled            bool     `yaml:"enabled"`
+		APIRequests        int      `yaml:"api_requests"`
+		APIWindowSeconds   int      `yaml:"api_window_seconds"`
+		LoginRequests      int      `yaml:"login_requests"`
+		LoginWindowSeconds int      `yaml:"login_window_seconds"`
+		Blacklist          []string `yaml:"blacklist"`
+		Whitelist          []string `yaml:"whitelist"`
+		TrustProxyHeaders  bool     `yaml:"trust_proxy_headers"`
+		LoginFailureLimit  int      `yaml:"login_failure_limit"`
+		LockoutMinutes     int      `yaml:"lockout_minutes"`
+		// LockoutIP 达到失败阈值时是否同时锁定来源 IP；用指针区分「未配置」与「显式关闭」，
+		// 未配置时默认启用（见 Config.ProtectionLockoutIP）。
+		LockoutIP *bool `yaml:"lockout_ip"`
+	} `yaml:"protection"`
+	// BackupDir 数据库备份目录（计划任务的备份产物落在这里）。
+	//
+	// 旧实现是从 sqlite_path 推导同级 backup 目录；权限库迁到 PostgreSQL 后
+	// 不再有数据库文件路径，因此改为独立配置项。
+	BackupDir string `yaml:"backup_dir"`
+	// Postgres PostgreSQL 连接配置。
+	//
+	// 权限库（sa_system_*）与监控库（agents/alerts/...）共用这一套连接参数，
+	// 在同一 database 内靠表名前缀区分。
+	Postgres PostgresConfig `yaml:"postgres"`
 	// Influx 时序库配置。
 	Influx struct {
 		// URL 地址。
@@ -167,21 +211,153 @@ type Config struct {
 		// RecordingDir 会话录像目录（相对进程工作目录，默认 data/ssh-recordings）。
 		RecordingDir string `yaml:"recording_dir"`
 	} `yaml:"remote"`
-	// Guacamole Apache Guacamole 嵌入配置（RDP 远程桌面）。
-	Guacamole struct {
-		// Enabled 是否启用；未启用时前端隐藏 RDP 入口。
+	// Guac Apache Guacamole 网关配置：浏览器内 RDP / VNC 远程桌面。
+	//
+	// 只需部署 guacd 这一个 C 守护进程，不需要 guacamole-client（Java/Tomcat/MySQL）。
+	// 连接参数由本服务在握手期权威注入，密码永不下发浏览器。
+	Guac struct {
+		// Enabled 是否启用远程桌面；未启用时前端隐藏入口。
 		Enabled bool `yaml:"enabled"`
-		// BaseURL guacamole-client 地址，形如 http://127.0.0.1:8080/guacamole。
-		BaseURL string `yaml:"base_url"`
-		// Username 管理 API 账号。
-		Username string `yaml:"username"`
-		// Password 管理 API 密码。
-		Password string `yaml:"password"`
-		// DataSource 数据源名，默认 mysql（官方 docker 镜像）。
-		DataSource string `yaml:"data_source"`
-	} `yaml:"guacamole"`
+		// Address guacd 地址（host:port），默认 127.0.0.1:4822。
+		Address string `yaml:"address"`
+		// RecordingEnabled 是否录制会话（输出 .guac 指令流，可在审计页回放）。
+		RecordingEnabled bool `yaml:"recording_enabled"`
+		// RecordingDirInGuacd 传给 guacd 的录像目录。
+		//
+		// 这是【guacd 所在文件系统】的路径：开发机上 guacd 跑在 WSL2 内，
+		// 该值是 /mnt/c/... 形态；生产上按容器/宿主机的实际路径填写。
+		RecordingDirInGuacd string `yaml:"recording_dir_in_guacd"`
+		// LocalRecordingDir webserver 读取录像的基准目录。
+		//
+		// 这是【本进程所在文件系统】的路径，与 RecordingDirInGuacd 指向同一份文件，
+		// 只是两个不同视角。拆成两个字段，是为了让同一份代码在 Windows 与 Linux 上都不必修改。
+		LocalRecordingDir string `yaml:"local_recording_dir"`
+		// ConnectTimeoutSeconds 拨号 guacd 的超时（秒），默认 5。
+		ConnectTimeoutSeconds int `yaml:"connect_timeout_seconds"`
+		// HandshakeTimeoutSeconds 握手超时（秒），默认 15。
+		HandshakeTimeoutSeconds int `yaml:"handshake_timeout_seconds"`
+		// IdleTimeoutSeconds 会话空闲超时（秒），默认 600；<=0 表示不限制。
+		IdleTimeoutSeconds int `yaml:"idle_timeout_seconds"`
+		// RetentionDays 录像保留天数，默认 30；<=0 表示不清理。
+		RetentionDays int `yaml:"retention_days"`
+	} `yaml:"guac"`
+	// Alert 资源告警配置（CPU / 内存 / 系统负载 / 磁盘持续超阈值 → 写日志 + 告警中心）。
+	Alert AlertConfig `yaml:"alert"`
 	// BootstrapAdminPassword 非空时每次启动都会把 admin 密码重置为该值。
 	BootstrapAdminPassword string `yaml:"bootstrap_admin_password"`
+}
+
+// AlertConfig 是资源告警（CPU / 内存 / 系统负载 / 磁盘持续超阈值）的配置。
+//
+// 阈值与判定期以数据库中的告警规则为准（可在「告警规则」页与服务器列表按需调整），
+// 本段只控制评估开关、查询行为与日志落盘。
+type AlertConfig struct {
+	// Enabled 是否启用资源告警评估。
+	Enabled bool `yaml:"enabled"`
+	// EvaluateIntervalSeconds 评估周期（秒）；默认 60。
+	EvaluateIntervalSeconds int `yaml:"evaluate_interval_seconds"`
+	// Query 时序窗口查询参数。
+	Query struct {
+		// MergeHosts 是否把同一规则下的多台主机合并为一次 Flux 查询；未配置时启用。
+		MergeHosts *bool `yaml:"merge_hosts"`
+		// MaxPoints 单次查询返回点数上限保护；默认 2000。
+		MaxPoints int `yaml:"max_points"`
+	} `yaml:"query"`
+	// Log 告警日志落盘配置（独立文件，避免与业务日志混在一起）。
+	Log AlertLogConfig `yaml:"log"`
+	// Attribution 告警归因配置。
+	Attribution struct {
+		// TopN 归因进程条数；默认 5。
+		TopN int `yaml:"top_n"`
+		// PreferProcstat 是否优先使用进程级采集（procstat）数据；未配置时启用。
+		// 关闭或数据缺失时退化为心跳里的进程内存快照（有内存维度、缺 CPU 占比）。
+		PreferProcstat *bool `yaml:"prefer_procstat"`
+	} `yaml:"attribution"`
+}
+
+// AlertLogConfig 是资源告警日志的落盘配置。
+type AlertLogConfig struct {
+	// Enabled 是否写独立日志文件；关闭时告警只进入业务日志。
+	Enabled bool `yaml:"enabled"`
+	// Format 输出形态：json（结构化 JSON Lines）/ text（人读文本）/ both；默认 both。
+	Format string `yaml:"format"`
+	// Dir 告警日志目录；默认 logs。
+	Dir string `yaml:"dir"`
+	// NamePattern 文件命名模板（不含扩展名），支持 {agent}（主机标识）与 {date}（YYYYMMDD）。
+	//
+	// 默认 {agent}-{date}-alerts，展开后同时产出 .log（结构化）与 .txt（人读），例如
+	// logs/loca-windows-20261009-alerts.log。主机标识会做文件名安全化（非法字符换成下划线）。
+	NamePattern string `yaml:"name_pattern"`
+	// MaxSizeMB 单文件大小上限（MB）；默认 32。
+	MaxSizeMB int `yaml:"max_size_mb"`
+	// MaxBackups 保留的历史文件数；默认 14。
+	MaxBackups int `yaml:"max_backups"`
+	// MaxAgeDays 历史文件保留天数；默认 30。
+	MaxAgeDays int `yaml:"max_age_days"`
+	// Compress 是否压缩历史文件；未配置时压缩。
+	Compress *bool `yaml:"compress"`
+}
+
+// AlertEvaluateInterval 返回资源告警的评估周期。
+//
+// 返回 Returns:
+//   - interval (time.Duration): 评估周期，未配置时为 60 秒。
+func (c Config) AlertEvaluateInterval() time.Duration {
+	if c.Alert.EvaluateIntervalSeconds <= 0 {
+		return time.Minute
+	}
+	return time.Duration(c.Alert.EvaluateIntervalSeconds) * time.Second
+}
+
+// AlertMergeHosts 返回是否把同一规则下的多台主机合并为一次查询。
+//
+// 返回 Returns:
+//   - merge (bool): 未配置时返回 true。
+func (c Config) AlertMergeHosts() bool {
+	if c.Alert.Query.MergeHosts == nil {
+		return true
+	}
+	return *c.Alert.Query.MergeHosts
+}
+
+// AlertPreferProcstat 返回是否优先使用进程级采集数据做归因。
+//
+// 返回 Returns:
+//   - prefer (bool): 未配置时返回 true。
+func (c Config) AlertPreferProcstat() bool {
+	if c.Alert.Attribution.PreferProcstat == nil {
+		return true
+	}
+	return *c.Alert.Attribution.PreferProcstat
+}
+
+// ToOptions 把资源告警配置转换为 resourcealert 服务的运行参数。
+//
+// 返回 Returns:
+//   - opts (resourcealert.Options): 服务运行参数。
+func (c AlertConfig) ToOptions() resourcealert.Options {
+	compress := true
+	if c.Log.Compress != nil {
+		compress = *c.Log.Compress
+	}
+	return resourcealert.Options{
+		Enabled:          c.Enabled,
+		EvaluateInterval: time.Duration(c.EvaluateIntervalSeconds) * time.Second,
+		MergeHosts:       c.Query.MergeHosts == nil || *c.Query.MergeHosts,
+		MaxPoints:        c.Query.MaxPoints,
+		TopN:             c.Attribution.TopN,
+		PreferProcstat:   c.Attribution.PreferProcstat == nil || *c.Attribution.PreferProcstat,
+		Log: resourcealert.LogOptions{
+			Enabled:     c.Log.Enabled,
+			Format:      c.Log.Format,
+			Dir:         c.Log.Dir,
+			NamePattern: c.Log.NamePattern,
+			MaxSizeMB:   c.Log.MaxSizeMB,
+			MaxBackups:  c.Log.MaxBackups,
+			MaxAgeDays:  c.Log.MaxAgeDays,
+			Compress:    compress,
+		},
+	}
 }
 
 // LoadConfig 读取并规范化 webserver 配置。
@@ -222,8 +398,38 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.HTTPAddress == "" {
 		cfg.HTTPAddress = ":8090"
 	}
-	if cfg.SQLitePath == "" {
-		cfg.SQLitePath = "data/webserver.db"
+	if cfg.Protection.APIRequests <= 0 {
+		cfg.Protection.APIRequests = 120
+	}
+	if cfg.Protection.APIWindowSeconds <= 0 {
+		cfg.Protection.APIWindowSeconds = 60
+	}
+	if cfg.Protection.LoginRequests <= 0 {
+		cfg.Protection.LoginRequests = 10
+	}
+	if cfg.Protection.LoginWindowSeconds <= 0 {
+		cfg.Protection.LoginWindowSeconds = 60
+	}
+	if cfg.Protection.LoginFailureLimit <= 0 {
+		cfg.Protection.LoginFailureLimit = 5
+	}
+	if cfg.Protection.LockoutMinutes <= 0 {
+		cfg.Protection.LockoutMinutes = 30
+	}
+	if cfg.BackupDir == "" {
+		cfg.BackupDir = "data/backup"
+	}
+	if cfg.Postgres.TimeZone == "" {
+		cfg.Postgres.TimeZone = "Asia/Shanghai"
+	}
+	if cfg.Postgres.MaxOpenConns <= 0 {
+		cfg.Postgres.MaxOpenConns = 20
+	}
+	if cfg.Postgres.MaxIdleConns <= 0 {
+		cfg.Postgres.MaxIdleConns = 5
+	}
+	if cfg.Postgres.ConnMaxLifetimeSeconds <= 0 {
+		cfg.Postgres.ConnMaxLifetimeSeconds = 1800
 	}
 	if cfg.JWT.AccessSeconds == 0 {
 		cfg.JWT.AccessSeconds = 7200
@@ -318,8 +524,61 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Log == (logger.Config{}) {
 		cfg.Log = logger.DefaultConfig("webserver")
 	}
+	// 资源告警运行参数与日志路径的默认值；阈值与判定期以数据库规则为准。
+	if cfg.Alert.EvaluateIntervalSeconds <= 0 {
+		cfg.Alert.EvaluateIntervalSeconds = 60
+	}
+	if cfg.Alert.Query.MaxPoints <= 0 {
+		cfg.Alert.Query.MaxPoints = 2000
+	}
+	if cfg.Alert.Attribution.TopN <= 0 {
+		cfg.Alert.Attribution.TopN = 5
+	}
+	if strings.TrimSpace(cfg.Alert.Log.Format) == "" {
+		cfg.Alert.Log.Format = "both"
+	}
+	if strings.TrimSpace(cfg.Alert.Log.Dir) == "" {
+		cfg.Alert.Log.Dir = "logs"
+	}
+	if strings.TrimSpace(cfg.Alert.Log.NamePattern) == "" {
+		cfg.Alert.Log.NamePattern = resourcealert.DefaultAlertNamePattern
+	}
+	if cfg.Alert.Log.MaxSizeMB <= 0 {
+		cfg.Alert.Log.MaxSizeMB = 32
+	}
+	if cfg.Alert.Log.MaxBackups <= 0 {
+		cfg.Alert.Log.MaxBackups = 14
+	}
+	if cfg.Alert.Log.MaxAgeDays <= 0 {
+		cfg.Alert.Log.MaxAgeDays = 30
+	}
 	if cfg.Remote.RecordingDir == "" {
 		cfg.Remote.RecordingDir = "logs/ssh-recordings"
+	}
+	// 远程桌面（guacd）：地址与各类超时给默认值。
+	if cfg.Guac.Address == "" {
+		cfg.Guac.Address = "127.0.0.1:4822"
+	}
+	if cfg.Guac.ConnectTimeoutSeconds <= 0 {
+		cfg.Guac.ConnectTimeoutSeconds = 5
+	}
+	if cfg.Guac.HandshakeTimeoutSeconds <= 0 {
+		cfg.Guac.HandshakeTimeoutSeconds = 15
+	}
+	if cfg.Guac.IdleTimeoutSeconds <= 0 {
+		cfg.Guac.IdleTimeoutSeconds = 600
+	}
+	if cfg.Guac.RetentionDays <= 0 {
+		cfg.Guac.RetentionDays = 30
+	}
+	// 录像目录的两个视角（详见 Guac 结构体上的注释）：
+	//   guacd 侧默认按「开发机 guacd 跑在 WSL2」填写，生产部署时改成容器/宿主的实际路径；
+	//   本地侧是 webserver 进程读盘用的路径，与前者指向同一份文件。
+	if cfg.Guac.RecordingDirInGuacd == "" {
+		cfg.Guac.RecordingDirInGuacd = "/mnt/c/monitor/guac-recordings/sessions"
+	}
+	if cfg.Guac.LocalRecordingDir == "" {
+		cfg.Guac.LocalRecordingDir = `C:\monitor\guac-recordings\sessions`
 	}
 	// 凭据加密密钥：优先 remote.secret_key / 环境变量，否则回退 jwt.secret。
 	if cfg.Remote.SecretKey == "" {
@@ -381,6 +640,17 @@ func (c Config) XSRFAllowOrigins() []string {
 		origins = append(origins, trimmed)
 	}
 	return origins
+}
+
+// ProtectionLockoutIP 判断登录失败是否同时锁定来源 IP（未配置时默认启用）。
+//
+// 返回 Returns:
+//   - enabled (bool): 是否启用 IP 锁定。
+func (c Config) ProtectionLockoutIP() bool {
+	if c.Protection.LockoutIP == nil {
+		return true
+	}
+	return *c.Protection.LockoutIP
 }
 
 // CacheEnabled 判断是否启用业务缓存（未配置时默认启用）。

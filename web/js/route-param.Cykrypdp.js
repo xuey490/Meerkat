@@ -1,0 +1,1 @@
+import{Dt as e,S as t,V as n,h as r,tn as i}from"./runtime-core.esm-bundler.DgOyhGNo.js";import{h as a}from"./useApi-BPuI6ZR9.DigZPpzv.js";var o={class:`p-5`},s=t({name:`Other`,inheritAttrs:!1,__name:`route-param`,setup(t){let s=a().query.type;return(t,a)=>(n(),r(`div`,o,`路由参数type：`+i(e(s)),1))}});export{s as default};

@@ -261,9 +261,10 @@ func (l *NoticeLogic) MarkAllRead(userID int64) error {
 	}
 	now := time.Now()
 	for _, row := range rows {
-		// 已读记录使用 (notice_id,user_id) 唯一索引，重复插入会被忽略。
+		// 已读记录使用 (notice_id,user_id) 唯一索引，重复插入靠 ON CONFLICT DO NOTHING 跳过
+		// （对应原 SQLite 的 INSERT OR IGNORE）。
 		if err := l.db.Exec(
-			`INSERT OR IGNORE INTO sa_system_notice_read (notice_id, user_id, read_time, create_time) VALUES (?, ?, ?, ?)`,
+			`INSERT INTO sa_system_notice_read (notice_id, user_id, read_time, create_time) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 			row.ID, userID, now, now).Error; err != nil {
 			return InternalErr("写入已读记录失败", err)
 		}

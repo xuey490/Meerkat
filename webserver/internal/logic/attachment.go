@@ -118,7 +118,9 @@ func (l *AttachmentLogic) UpdateCategory(row *model.SysCategory, parentChanged b
 			return nil
 		}
 		// 子树 level 均为 <oldPrefix> 开头，替换前缀即可整体迁移。
-		statement := "UPDATE sa_system_category SET level = ? || substr(level, ?) WHERE level LIKE ? || '%'"
+		// 显式标注参数类型：PostgreSQL 在 text || text 与 substr(text, int) 的位置上
+		// 需要能推导出参数类型，写死转换可以避免「无法确定参数类型」的报文错误。
+		statement := "UPDATE sa_system_category SET level = ?::text || substr(level, ?::int) WHERE level LIKE ?::text || '%'"
 		if err := tx.Exec(statement, newPrefix, len(oldPrefix)+1, oldPrefix).Error; err != nil {
 			return InternalErr("同步子分类层级失败", err)
 		}

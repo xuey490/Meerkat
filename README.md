@@ -9,15 +9,9 @@
 </div>
 
 
-背景痛点：如果你是公司的运维人员，要管理几十上百台裸金属服务器，虚拟机，Docker容器，K8s节点，你必须时刻紧盯上面的服务状态，负载性能等各项指标，时刻24小时stand By。 
-
-meerkat-admin就是为解决这个痛点而来的，现在有个狐獴帮你主动报警，及时介入。
-
-
+背景痛点：如果你是公司的运维人员，要管理几十上百台裸金属服务器，虚拟机，Docker容器，K8s节点，你必须时刻紧盯上面的服务状态，负载性能等各项指标，时刻24小时stand By。 meerkat-admin就是为解决这个痛点而来的，现在有个狐獴帮你主动报警，及时介入。
 Agent端一旦部署在客户机上，主动采集指标，向中心机汇聚、存储与展示，几分钟后就可以在web dashboard看到各项指标。
 **指标不经 Telegraf 直写 InfluxDB**，经 **monitor-agent** 用 **mTLS gRPC** 上报到 **Collector**。
-
-### 演示网址：https://monitor.phpframe.org/   商业部署联系作者微信：xdbyvibm6 （注明来意）
 
 已完成的功能：
 - [x]内置ssh控制台，可以用户名连接，密钥连接;
@@ -25,12 +19,12 @@ Agent端一旦部署在客户机上，主动采集指标，向中心机汇聚、
 - [x]高危命令过滤，防止出现服务器崩盘;
 - [x]SSH命令会话审计，录像回放;
 - [x]计划任务,计划任务日志;
+- [x]告警参数设置,告警规则设置,告警日志查看;
+- [x]告警日志留存;
+- [x]完成RDP,VNC,SSH远程连接，操作;
 - [x]还内置了一套完整的后台管理系统，基于Gin Gorm, Sqlite，（包括完整的用户、部门、角色、岗位、菜单、字典、系统设置、缓存、系统日志、附件等）可以单独独立出来;
 
 下一步计划：
-- [ ]完成RDP远程连接，操作
-- [ ]告警参数设置
-- [ ]告警日志留存
 - [ ]告警通知，短信、飞书、邮件等
 - [ ]接入大模型对告警进行分析处理，形成报告
 - [ ]命令编排等
@@ -38,7 +32,7 @@ Agent端一旦部署在客户机上，主动采集指标，向中心机汇聚、
 
 本仓库是**源码 + 本机开发运行包**的合集（多个 Go module），**未使用 Docker**。第三方组件用系统安装包或工作区已解压的二进制；Windows / Linux 均提供一键脚本（见 [§8](#8-一键脚本总览)）。
 
-
+### 演示网址：https://monitor.phpframe.org/   商业部署联系作者微信：xdbyvibm6 （注明来意）
 
 ---
 
@@ -55,9 +49,10 @@ Agent端一旦部署在客户机上，主动采集指标，向中心机汇聚、
 9. [Windows 操作手册](#9-windows-操作手册)
 10. [Linux 操作手册（Ubuntu / Debian 系）](#10-linux-操作手册ubuntu--debian-系)
 11. [健康检查：端口、进程、HTTP](#11-健康检查端口进程http)
-12. [证书（mTLS）](#12-证书mtls)
-13. [配置文件索引](#13-配置文件索引)
-14. [安全与更多文档](#14-安全与更多文档)
+12. [远程桌面（RDP / VNC）部署](#12-远程桌面rdp--vnc部署)
+13. [证书（mTLS）](#13-证书mtls)
+14. [配置文件索引](#14-配置文件索引)
+15. [安全与更多文档](#15-安全与更多文档)
 
 ---
 
@@ -354,10 +349,10 @@ sudo install -Dm600 ca.pem client.pem client-key.pem /etc/monitor-agent/certs/
 | `scripts/windows/agent/start.ps1` | Windows | monitor-agent + Telegraf（可见控制台） |
 | `scripts/windows/agent/stop.ps1` | Windows | telegraf + monitor-agent |
 | `scripts/cert/Generate-mTLSCerts.ps1` | Windows | 默认 Go certgen → `client/certs` |
-| `scripts/setup-linux.sh` | Linux | 安装 **Go 1.27.1**、写 `monitor.env`、apt 装 PG/Influx/Telegraf（可跳过）、编译到 `dist/linux-*`；**不启动 InfluxDB** |
+| `scripts/setup-linux.sh` | Linux | 安装 **Go 1.27.1**、写 `monitor.env`、apt 装 PG/Influx/Telegraf（可跳过）、编译到 `dist/linux-*`；**不启动 InfluxDB**；安装 telegraf 后会停用其默认自启服务（避免默认配置抢占） |
 | `scripts/linux/server/start.sh` | Linux | PG、Influx、Collector、webserver；**不启动** `pnpm dev` |
 | `scripts/linux/server/stop.sh` | Linux | 停中心进程；`INFRA=1` 停 PostgreSQL |
-| `scripts/linux/agent/start.sh` | Linux | agent + telegraf |
+| `scripts/linux/agent/start.sh` | Linux | agent + telegraf（用 `Telegraf/telegraf-linux.conf`；发现系统自带 telegraf 服务用默认配置时会自动停用并接管，`MONITOR_TELEGRAF_TAKEOVER=0` 可关闭接管） |
 | `scripts/linux/agent/stop.sh` | Linux | agent + telegraf |
 
 ---
@@ -443,6 +438,9 @@ cd web && pnpm install && pnpm dev
 | 8080 | Collector 管理 HTTPS | 中心 |
 | 8090 | webserver | 中心 |
 | 3000 | Vite 开发 / 静态站 | 中心（开发） |
+| 4822 | guacd（远程桌面网关，见第 12 节） | 网关机（开发机在 WSL2） |
+| 5900 / 590N | 目标机 VNC Server | 被控机器（`vncserver :N` → `5900+N`） |
+| 3389 | 目标机 RDP | 被控 Windows |
 | 9510 | Agent 收 Telegraf | 被监控（仅 127.0.0.1） |
 | 9511 | Agent healthz | 被监控（仅 127.0.0.1） |
 
@@ -466,8 +464,8 @@ Get-Process postgres,influxd,collector,webserver,monitor-agent,telegraf,node -Er
 ### 11.4 Linux：端口与进程
 
 ```bash
-ss -lnt | grep -E ':(5432|8086|9500|8080|8090|3000|9510|9511)\b'
-pgrep -a influxd; pgrep -a collector; pgrep -a webserver; pgrep -a monitor-agent; pgrep -a telegraf
+ss -lnt | grep -E ':(5432|8086|9500|8080|8090|3000|9510|9511|4822)\b'
+pgrep -a influxd; pgrep -a collector; pgrep -a webserver; pgrep -a monitor-agent; pgrep -a telegraf; pgrep -a guacd
 ```
 
 ### 11.5 HTTP 探活
@@ -496,7 +494,239 @@ curl -sS http://127.0.0.1:9511/healthz
 
 ---
 
-## 12. 证书（mTLS）
+## 12. 远程桌面（RDP / VNC）部署
+
+### 12.1 三个角色装在三台不同的机器上
+
+远程桌面要三样东西，**它们通常不在同一台机器上**，这是配置出错的最大来源：
+
+```
+浏览器 ──HTTP/WS──> webserver(:8090) ──Guacamole 协议──> guacd(:4822) ──RDP/VNC──> 目标机
+                    (中心机)                             (网关机，任意 Linux)     (被控机器本身)
+```
+
+| 角色 | 装在哪 | 说明 |
+| --- | --- | --- |
+| **guacd** | 任意 Linux（开发机可放 WSL2，也可独立虚拟机 / 容器） | 唯一的协议网关，只监听 4822 |
+| **VNC / RDP Server** | **被控的目标机自己** | Windows 装 TightVNC；Linux 装 TigerVNC；Windows 也可直接用系统 RDP |
+| **webserver** | 中心机 | `guac.address` 指向 guacd |
+
+**关键认知**：guacd 只是「代理」，它去连的是**目标机自己的** VNC/RDP 服务。目标机上必须真的有一个在跑的 VNC Server，否则怎么配都连不上。
+
+### 12.2 guacd 部署
+
+只部署 guacd 一个 C 守护进程，**不装 guacamole-client**（省掉 Java / Tomcat / MySQL，也不再占用 8080）。官方没有 Windows 原生二进制，Windows 开发机装在 WSL2 内即可。
+
+```powershell
+# Windows 开发机（WSL2）
+pwsh -File scripts\guacd\deploy-guacd.ps1
+```
+
+```bash
+# Linux 生产机
+sudo bash scripts/guacd/deploy-guacd.sh
+
+# 独立验证 guacd 是否响应握手（排查「端口通但连不上」的第一现场）
+python3 scripts/guacd/probe-guacd.py rdp vnc
+
+# 更细的诊断（版本、监听、进程、日志）
+sudo bash scripts/guacd/diag-guacd.sh
+```
+
+脚本做四件事：装 guacd → **绑定 `0.0.0.0`** → 用 systemd 常驻 → 准备录像目录并做连通性自检。
+
+> **两个必须知道的坑**（脚本已处理，手装极易踩中）：
+>
+> 1. guacd 默认只监听 `127.0.0.1`，而 WSL2 的 localhost 转发**不转发回环监听**，必须改成 `0.0.0.0`。
+> 2. guacd 1.3.0 自行 daemonize 后会留下「端口在监听、进程也在、但 accept 后不处理请求」的半死状态——表现为**握手永远无应答，且日志里连一条连接记录都没有**，很容易被误判成协议实现错误。必须加 `-f` 让它前台运行、交给 systemd 托管。
+
+容器方式（最少只需 guacd 一个服务，不再需要 MySQL）：
+
+```yaml
+# docker-compose.yml
+services:
+  guacd:
+    image: guacamole/guacd:1.5.5
+    restart: unless-stopped
+    ports: ["4822:4822"]
+    volumes:
+      - ./guac-recordings:/var/lib/guacd/recordings
+```
+
+webserver 侧对应配置（`webserver/configs/webserver.yaml`）：
+
+```yaml
+guac:
+  enabled: true
+  address: "192.168.1.18:4822"   # guacd 所在机；同机填 127.0.0.1:4822
+```
+
+> 字段的完整说明见 `webserver/README.md` 的「guacd 部署」小节。
+
+### 12.3 Windows 目标机：装 TightVNC（**不要用 RealVNC**）
+
+RealVNC 与 guacd **不兼容，且无法靠调配置绕过**（实测结论）：
+
+| | RealVNC 7.x | TightVNC 2.8.84 |
+| --- | --- | --- |
+| 协议版本 | `RFB 005.000`（私有） | **`RFB 003.008`**（标准） |
+| 认证类型 | 6 个**全是私有编号**（6 / 130 / 13 / 133 / 5 / 129），没有标准 VNC Auth | **含标准类型 2** |
+| guacd（libvncclient） | 解析到 major=5 直接放弃 → 报 **`519`** | 原生兼容 |
+
+> `519 = 0x0207 = UPSTREAM_NOT_FOUND`。「上游」指 guacd 要连的那个 VNC/RDP——**连不上、或不兼容**都报这个码，所以要结合目标机侧一起判断。
+
+静默安装并预设密码：
+
+```powershell
+# 1) 下载
+Invoke-WebRequest -Uri 'https://www.tightvnc.com/download/2.8.84/tightvnc-2.8.84-gpl-setup-64bit.msi' `
+  -OutFile "$env:TEMP\tightvnc.msi"
+
+# 2) 若装有 RealVNC，先静默卸载（GUID 取自注册表 UninstallString）
+MsiExec.exe /X{粘贴_GUID} /qn /norestart
+
+# 3) 静默安装 + 设置 VNC 密码
+msiexec /i "$env:TEMP\tightvnc.msi" /qn ADDLOCAL=Server SILENT=1 `
+  SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 `
+  SET_PASSWORD=1 VALUE_OF_PASSWORD=你的密码 `
+  SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1 `
+  SET_RFBPORT=1 VALUE_OF_RFBPORT=5900
+```
+
+要点：
+
+- 服务名 **`tvnserver`**，默认监听 **`0.0.0.0:5900`**
+- **VNC 密码最长 8 字符**（VNC Authentication 协议本身的限制）
+- 验证：`Get-Service tvnserver` + `Get-NetTCPConnection -State Listen -LocalPort 5900`
+- 防火墙需放行**入站 5900**（TightVNC 安装时会自带规则，profile 覆盖 Any）
+
+确认目标机的协议能被 guacd 接受（读 banner → 回发标准版本 → 看安全类型）：
+
+```powershell
+$c = New-Object Net.Sockets.TcpClient; $c.Connect("目标机IP", 5900)
+$s = $c.GetStream(); $s.ReadTimeout = 4000
+$b = New-Object byte[] 12; $null = $s.Read($b, 0, 12)
+"banner = " + [System.Text.Encoding]::ASCII.GetString($b, 0, 12).Trim()   # 期望 RFB 003.008
+$send = [System.Text.Encoding]::ASCII.GetBytes("RFB 003.008`n")
+$s.Write($send, 0, $send.Length); $s.Flush(); Start-Sleep -Milliseconds 600
+$r = New-Object byte[] 32; $n = $s.Read($r, 0, 32)
+($r[1..$r[0]] | ForEach-Object { "$_" }) -join ", "   # 期望含 2（标准 VNC Auth）
+$c.Close()
+```
+
+### 12.4 Linux 目标机：TigerVNC + XFCE，并交给 systemd
+
+```bash
+# 0) 先确保 apt 可用：失效的 PPA 会让 apt update 失败，
+#    而 `apt update && apt install` 会因短路而「静默跳过安装」
+rm -f /etc/apt/sources.list.d/guacamole*.list
+
+apt update
+apt install -y tigervnc-standalone-server xfce4 xfce4-goodies dbus-x11
+
+# 1) xstartup 必须 exec 一个「前台常驻」的桌面，否则脚本跑完就退，
+#    Xtigervnc 判定会话已死（日志: cleanly exited too early）
+cat > ~/.vnc/xstartup <<'EOF'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+exec startxfce4
+EOF
+chmod +x ~/.vnc/xstartup
+
+# 2) 设置连接密码
+vncpasswd
+```
+
+交给 systemd 常驻——**手动 `vncserver :2` 在 SSH 断开或机器重启后就没了**：
+
+```bash
+cat > /etc/systemd/system/vncserver-2.service <<'EOF'
+[Unit]
+Description=TigerVNC display :2 (port 5902)
+After=network.target
+
+[Service]
+Type=forking
+User=root
+Environment=HOME=/root
+Environment=USER=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=-/usr/bin/vncserver -kill :2
+ExecStartPre=-/bin/rm -f /tmp/.X2-lock /tmp/.X11-unix/X2
+ExecStart=/usr/bin/vncserver :2 -localhost no
+ExecStop=/usr/bin/vncserver -kill :2
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now vncserver-2
+ss -lntp | grep 5902
+```
+
+要点：
+
+- **display 号就是端口**：`:2` → **5902**、`:1` → **5901**。连接信息里的端口必须跟着改，填 5900 一定连不上。
+- **TigerVNC 默认 `-localhost`，只监听 `127.0.0.1`**：
+  - guacd 与它**同机** → 连接信息的地址填 `127.0.0.1`（推荐，不必把端口对外开放）
+  - 需要别的机器直连 → 启动参数加 `-localhost no`，或在 `/etc/tigervnc/vncserver-config-defaults` 写 `localhost=no`
+- systemd 单元里 **`HOME` / `USER` / `PATH` 不能省**：服务环境不继承登录会话，缺 `HOME` 会让 `vncserver` 找不到 `~/.vnc/` 而启动失败——这是「手动能跑、systemd 一跑就挂」的典型原因。
+- `Cannot establish any listening sockets` = 残留锁，清掉 `/tmp/.X{n}-lock` 与 `/tmp/.X11-unix/X{n}`；**换个 display 号能立刻判断**是该 display 专属残留，还是环境问题。
+
+### 12.5 在 webserver 里填连接信息（视角最容易错）
+
+服务器列表 → 该机器 → **连接信息**。三层地址各有各的视角：
+
+| 环节 | 填在哪里 | 值 |
+| --- | --- | --- |
+| 浏览器 → webserver | 浏览器地址栏 | webserver 所在机 IP:8090 |
+| webserver → guacd | `webserver.yaml` 的 `guac.address` | guacd 所在机 IP:4822 |
+| **guacd → VNC/RDP** | **界面的「连接信息」** | **以 guacd 的视角**：同机填 `127.0.0.1`，不同机填目标机可达 IP |
+
+| 协议 | 默认端口 | 用户名 |
+| --- | --- | --- |
+| SSH | 22 | 必填 |
+| RDP | 3389 | 必填 |
+| VNC | 5900（`vncserver :N` 则为 `5900+N`） | **可留空**（VNC Auth 只有密码） |
+
+**同一台机器可以并存多条配置**（SSH / RDP / VNC 各一条，互不影响）；删除时也只删当前协议那一条。
+
+### 12.6 排障对照
+
+| 现象 | 含义 | 处理 |
+| --- | --- | --- |
+| `519` / `Aborted. See logs. 519` | UPSTREAM_NOT_FOUND：guacd 连不上目标 VNC/RDP（含协议不兼容） | 核对「连接信息」的地址视角与端口；确认目标机 VNC 在监听 |
+| 目标端口 `nc` 通、guacd 却连不上 | 协议 / 认证不兼容（典型是 RealVNC） | 换 TightVNC / TigerVNC，见 12.3 |
+| `WebSocket is closed before the connection is established` | WS 握手失败（票据无效或后端提前拒绝） | 查 `webserver.run.log` 里的远程桌面日志 |
+| guacd 在监听、握手无应答、日志无连接记录 | guacd 自行 daemonize 的半死状态 | `-f` 前台 + systemd，见 12.2 |
+| 录像能生成、回放 404 | `local_recording_dir` 填成了 guacd 视角的路径 | 见 12.7 |
+| 画面里出现「自己」并无限嵌套 | VNC 目标就是本机，且本机桌面正显示这个页面 | 换一台机器访问；不要在画面里操作（键鼠会真实作用到目标机） |
+
+### 12.7 分机部署时录像目录的两个视角
+
+录像是**两个字段**，指同一份文件的两个视角，填错只会表现为「回放 404」：
+
+```yaml
+guac:
+  # guacd 所在机器上写出的路径
+  recording_dir_in_guacd: "/var/lib/monitor/guac-recordings/sessions"
+  # webserver 本机读到的路径（分机时需能访问同一份文件）
+  local_recording_dir: '\\192.168.1.18\guac-rec\sessions'
+```
+
+- guacd 与 webserver **同机**：两个值可以相同
+- **分机**：必须让 webserver 读到 guacd 写出的文件（SMB / NFS 共享），否则录像正常生成但**回放 404**
+- 该目录在 guacd 侧必须存在且 `guacd` 用户可写，否则**开启录像会让握手直接失败**
+
+---
+
+## 13. 证书（mTLS）
 
 测试环境一键生成（**共用一张 client 证**，多机复制 `ca.pem` + `client.pem` + `client-key.pem`）：
 
@@ -521,7 +751,7 @@ go run .\cmd\certgen -out ..\client\certs
 
 ---
 
-## 13. 配置文件索引
+## 14. 配置文件索引
 
 | 文件 | 用途 |
 | --- | --- |
@@ -533,13 +763,14 @@ go run .\cmd\certgen -out ..\client\certs
 | `webserver/configs/webserver.yaml` | Web API |
 | `web/.env.development` | 前端开发代理与 API 地址 |
 | `Telegraf/telegraf.conf` | 本机 Telegraf |
-| `client/telegraf/telegraf.conf.template` | Linux Telegraf 模板 |
+| `Telegraf/telegraf-linux.conf` | Linux 一键脚本使用的 Telegraf 配置（配合 `Telegraf/run-linux.sh` 注入 `MONITOR_*` 环境变量） |
+| `client/telegraf/telegraf.conf.template` | Linux Telegraf 模板（systemd 方式用） |
 
 环境变量覆盖（webserver）：`WEBSERVER_JWT_SECRET`、`WEBSERVER_ADMIN_PASSWORD`、`MONITOR_POSTGRES_PASSWORD`、`MONITOR_INFLUX_TOKEN` — 详见 `webserver/README.md`。
 
 ---
 
-## 14. 安全与更多文档
+## 15. 安全与更多文档
 
 - 口令、Influx Token、JWT **不要提交 git**；生产用环境变量或权限受限的配置文件。
 - Agent 监听 **9510 / 9511 仅 127.0.0.1**；Telegraf 不要携带中心写 Token。

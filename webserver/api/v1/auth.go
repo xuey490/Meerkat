@@ -2,11 +2,13 @@ package v1
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/company/monitor-webserver/api/middleware"
 	"github.com/company/monitor-webserver/internal/captcha"
 	"github.com/company/monitor-webserver/internal/dto"
 	"github.com/company/monitor-webserver/internal/service"
@@ -107,16 +109,65 @@ func (h *AuthAPI) Login(c *gin.Context) {
 		return
 	}
 	result, err := h.auth.Login(c.Request.Context(), req,
-		service.RequestMeta{IP: ClientIP(c), UserAgent: c.Request.UserAgent()})
+		service.RequestMeta{IP: ClientIP(c), UserAgent: c.Request.UserAgent(),
+			ProtectionExempt: middleware.ProtectionExempt(c)})
 	if err != nil {
+		var loginErr *service.LoginError
+		if errors.As(err, &loginErr) {
+			if loginErr.Info.Locked {
+				write(c, http.StatusLocked, credentialsCode, lockedMessage(loginErr.Info), loginFailureData(loginErr.Info))
+			} else {
+				write(c, http.StatusUnauthorized, credentialsCode, "用户名或密码错误", loginFailureData(loginErr.Info))
+			}
+			return
+		}
 		if errors.Is(err, service.ErrBadCredentials) {
 			write(c, http.StatusUnauthorized, credentialsCode, "用户名或密码错误", nil)
+			return
+		}
+		if errors.Is(err, service.ErrAccountLocked) {
+			write(c, http.StatusLocked, credentialsCode, "账户已锁定，请稍后再试", nil)
 			return
 		}
 		Fail(c, err, "登录失败")
 		return
 	}
 	OK(c, result)
+}
+
+// lockedMessage 生成锁定提示语：带上剩余解锁时间，前端可直接展示倒计时。
+//
+// 参数 Parameters:
+//   - info (service.LoginFailureInfo): 锁定信息。
+//
+// 返回 Returns:
+//   - message (string): 提示语。
+func lockedMessage(info service.LoginFailureInfo) string {
+	minutes := info.LockoutMinutes
+	if info.RetryAfterSeconds > 0 {
+		// 向上取整：剩余 90 秒提示「2 分钟」而不是「1 分钟」。
+		minutes = (info.RetryAfterSeconds + 59) / 60
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("登录失败次数过多，账号或来源 IP 已被临时锁定，请 %d 分钟后重试", minutes)
+	}
+	return "账户已锁定，请稍后再试"
+}
+
+func loginFailureData(info service.LoginFailureInfo) gin.H {
+	if info.FailedAttempts == 0 && !info.Locked {
+		return nil
+	}
+	data := gin.H{
+		"failedAttempts":    info.FailedAttempts,
+		"remainingAttempts": info.RemainingAttempts,
+		"locked":            info.Locked,
+		"lockoutMinutes":    info.LockoutMinutes,
+	}
+	if info.Locked {
+		data["retryAfterSeconds"] = info.RetryAfterSeconds
+	}
+	return data
 }
 
 // Refresh 处理 POST /api/v1/auth/refresh-token：用刷新令牌换取新的访问令牌。

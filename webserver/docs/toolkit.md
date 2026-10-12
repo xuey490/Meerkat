@@ -18,8 +18,7 @@ github.com/company/monitor-webserver
 | `pkg/httpx` | Gin HTTP 统一响应 |
 | `pkg/middleware` | CORS、JWT、RequestID、请求日志 |
 | `pkg/grpcx` | gRPC request_id 透传和日志拦截器 |
-| `pkg/database` | SQLite/MySQL/PostgreSQL Gorm 统一入口 |
-| `pkg/mysqlx` | MySQL Gorm 初始化 |
+| `pkg/mysqlx` | MySQL Gorm 初始化（模板 CLI 用，webserver 运行时不使用） |
 | `pkg/postgresx` | PostgreSQL Gorm 初始化 |
 | `pkg/mongox` | MongoDB 官方 driver 初始化和公共 DocumentStore CRUD 操作 |
 | `pkg/redisx` | Redis client 初始化 |

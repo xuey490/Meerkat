@@ -3,7 +3,7 @@ package util
 // DefaultPageSize 是未传 pageSize 时的默认每页条数。
 const DefaultPageSize = 20
 
-// MaxPageSize 是单次请求的每页条数上限，避免单次查询拖垮 SQLite。
+// MaxPageSize 是单次请求的每页条数上限，避免单次查询返回过多数据拖垮服务。
 const MaxPageSize = 100
 
 // NormalizePage 收敛分页参数 pageNum/pageSize。

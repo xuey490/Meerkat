@@ -1,0 +1,1 @@
+import{Dt as e,O as t,d as n}from"./runtime-core.esm-bundler.DgOyhGNo.js";import{g as r}from"./style.Cy2L_Ar8.js";var i=[``,`default`,`small`,`large`],a=r({type:String,values:i,required:!1}),o=Symbol(`size`),s=()=>{let r=t(o,{});return n(()=>e(r.size)||``)};export{i,s as n,a as r,o as t};

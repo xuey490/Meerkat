@@ -16,8 +16,8 @@
 | 语言 | Go 1.25+ | `go.mod` |
 | HTTP Gateway | Gin | `internal/gateway/router` |
 | 内部通信 | gRPC + Protocol Buffers | `api/proto`、`api/gen` |
-| ORM | Gorm | `pkg/database`、`internal/*/repo` |
-| 关系型数据库 | SQLite、MySQL、PostgreSQL | `pkg/database`、`pkg/mysqlx`、`pkg/postgresx` |
+| ORM | Gorm | `internal/app`（连接装配）、`internal/*/logic` |
+| 关系型数据库 | PostgreSQL | `internal/app`、`pkg/postgresx` |
 | 文档数据库 | MongoDB 官方 Go Driver | `pkg/mongox` |
 | 缓存与消息 | Redis、Kafka、RocketMQ | `pkg/redisx`、`pkg/kafkax`、`pkg/rocketmqx` |
 | 搜索 | Elasticsearch v7 client | `pkg/esx` |
@@ -37,7 +37,7 @@ flowchart LR
     User["User gRPC Service\ncmd/user"]
     Note["Note gRPC Service\ncmd/note"]
     Order["Order gRPC Service\ncmd/order"]
-    SQL["SQLite/MySQL/PostgreSQL\nGorm"]
+    SQL["PostgreSQL\nGorm"]
     Mongo["MongoDB\nmongox"]
     Config["configs/config.yaml\nor Nacos"]
     Common["pkg/* 公共能力\nlogger/errors/middleware/grpcx/httpx"]

@@ -40,6 +40,17 @@ type entry struct {
 	expireAt time.Time
 }
 
+// expired 判断记录在给定时刻是否已过期。
+//
+// 参数 Parameters:
+//   - now (time.Time): 判定时刻。
+//
+// 返回 Returns:
+//   - expired (bool): 已过期时为 true（零值过期时间表示永不过期）。
+func (e entry) expired(now time.Time) bool {
+	return !e.expireAt.IsZero() && now.After(e.expireAt)
+}
+
 // Store 是业务缓存。
 type Store struct {
 	// client Redis 客户端；为 nil 时使用进程内缓存。
@@ -193,6 +204,93 @@ func (s *Store) SetWithTTL(ctx context.Context, key string, value any, ttl time.
 	s.items[full] = record
 	s.mu.Unlock()
 	return nil
+}
+
+// Incr 原子自增一个计数键，并在每次自增后刷新过期时间。
+//
+// 典型用途是「带自动过期的失败计数」：登录失败次数、验证码尝试次数等。
+// Redis 后端用 INCR + EXPIRE 流水线保证原子性（并发下不会丢计数）；
+// 进程内后端在写锁内自增，语义一致。
+//
+// 参数 Parameters:
+//   - ctx (context.Context): 请求上下文。
+//   - key (string): 业务键。
+//   - ttl (time.Duration): 过期时间；<=0 时使用默认 TTL（默认 TTL 也为 0 则永不过期）。
+//
+// 返回 Returns:
+//   - value (int64): 自增后的计数值。
+//   - err (error): 序列化或 Redis 操作失败时返回错误（调用方应做降级处理）。
+func (s *Store) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	if s == nil {
+		return 0, nil
+	}
+	if ttl <= 0 {
+		ttl = s.ttl
+	}
+	full := s.fullKey(key)
+	if s.client != nil {
+		pipe := s.client.TxPipeline()
+		counter := pipe.Incr(ctx, full)
+		if ttl > 0 {
+			pipe.Expire(ctx, full, ttl)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			return 0, err
+		}
+		return counter.Val(), nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var current int64
+	if record, ok := s.items[full]; ok && !record.expired(now) {
+		_ = json.Unmarshal(record.value, &current)
+	}
+	current++
+	raw, err := json.Marshal(current)
+	if err != nil {
+		return 0, err
+	}
+	record := entry{value: raw}
+	if ttl > 0 {
+		record.expireAt = now.Add(ttl)
+	}
+	s.items[full] = record
+	return current, nil
+}
+
+// TTL 返回键的剩余有效期。
+//
+// 参数 Parameters:
+//   - ctx (context.Context): 请求上下文。
+//   - key (string): 业务键。
+//
+// 返回 Returns:
+//   - ttl (time.Duration): 剩余有效期；键不存在、已过期或永不过期时返回 0。
+func (s *Store) TTL(ctx context.Context, key string) time.Duration {
+	if s == nil {
+		return 0
+	}
+	full := s.fullKey(key)
+	if s.client != nil {
+		ttl, err := s.client.TTL(ctx, full).Result()
+		if err != nil || ttl <= 0 {
+			// -1 无过期时间、-2 键不存在，统一按 0 返回。
+			return 0
+		}
+		return ttl
+	}
+	s.mu.RLock()
+	record, ok := s.items[full]
+	s.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	now := time.Now()
+	if record.expired(now) || record.expireAt.IsZero() {
+		return 0
+	}
+	return record.expireAt.Sub(now)
 }
 
 // Delete 删除指定键。

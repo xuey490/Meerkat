@@ -397,7 +397,8 @@ func (SysConfigGroup) TableName() string { return "sa_system_config_group" }
 
 // SysConfig 对应 sa_system_config 系统配置表。
 //
-// key / value 为 init.sql 中的列名，SQLite 下由 GORM 自动加引号避免与关键字冲突。
+// key / value 为 init.sql 中的列名；GORM 会自动为标识符加引号，避免与关键字冲突
+// （PostgreSQL 中 key 属非保留关键字，加引号后行为与其它列一致）。
 type SysConfig struct {
 	// ID 主键。
 	ID int64 `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
@@ -520,7 +521,10 @@ type SysOperLog struct {
 	// Router 请求路由。
 	Router *string `gorm:"column:router;size:500" json:"router"`
 	// ServiceName 业务标题（由操作日志中间件按路由推断）。
-	ServiceName *string `gorm:"column:service_name;size:30" json:"serviceName"`
+	//
+	// 长度 64 而不是 30：旧 SQLite 库不校验 VARCHAR(n)，历史上写入过 33 字符的标题，
+	// 迁到 PostgreSQL 时 30 会直接报 22001，这里与 schema 定义保持一致放宽。
+	ServiceName *string `gorm:"column:service_name;size:64" json:"serviceName"`
 	// IP 请求 IP。
 	IP *string `gorm:"column:ip;size:45" json:"ip"`
 	// IPLocation IP 归属地。

@@ -1,32 +1,19 @@
 package app
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 
 	"github.com/company/monitor-webserver/internal/model"
+	"github.com/company/monitor-webserver/internal/testutil/pgtest"
 )
 
-// newTestDB 打开一个临时 SQLite 权限库。
+// newTestDB 打开一个独立的 PostgreSQL 测试库（每个用例一个 schema，结束自动清理）。
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "webserver.db")
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatalf("打开测试库失败: %v", err)
-	}
-	// Windows 下 SQLite 文件会保持占用，测试结束前显式关闭连接。
-	t.Cleanup(func() {
-		if sqlDB, err := db.DB(); err == nil {
-			_ = sqlDB.Close()
-		}
-	})
-	return db
+	return pgtest.Open(t)
 }
 
 // TestMigrateSeedsPermissionData 验证迁移写入表结构与种子数据，并且可重复执行。
@@ -86,6 +73,35 @@ func TestMigrateSeedsPermissionData(t *testing.T) {
 	}
 	if users != 1 {
 		t.Fatalf("重复迁移产生了重复管理员: %d", users)
+	}
+}
+
+// TestMigrateAdvancesIdentitySequences 验证种子写入固定主键后，自增序列被推进到最大值。
+//
+// 这是迁到 PostgreSQL 最容易漏的坑：identity 序列不会因为显式写入了 id 而前进，
+// 缺少校正时种子跑完后第一条真实 INSERT 会从 1 开始分配，直接撞上已占用的主键。
+func TestMigrateAdvancesIdentitySequences(t *testing.T) {
+	db := newTestDB(t)
+	if err := Migrate(db, ""); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	// 覆盖「有种子数据」（menu/role/user）与「无种子数据」（login_log/notice）两类表：
+	// 前者验证序列被推过已占用的 id，后者验证空表下序列仍从未使用的位置开始。
+	for _, table := range []string{
+		"sa_system_menu", "sa_system_role", "sa_system_user",
+		"sa_system_login_log", "sa_system_notice",
+	} {
+		var nextID int64
+		if err := db.Raw("SELECT nextval(pg_get_serial_sequence(?, 'id'))", table).Scan(&nextID).Error; err != nil {
+			t.Fatalf("表 %s 读取自增序列失败: %v", table, err)
+		}
+		var maxID int64
+		if err := db.Raw("SELECT COALESCE(MAX(id), 0) FROM " + table).Scan(&maxID).Error; err != nil {
+			t.Fatalf("表 %s 查询最大 id 失败: %v", table, err)
+		}
+		if nextID <= maxID {
+			t.Errorf("表 %s 自增序列未校正：下一个值 %d 未超过已占用的最大 id %d", table, nextID, maxID)
+		}
 	}
 }
 

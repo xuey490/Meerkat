@@ -6,11 +6,11 @@
 
 ```text
 cmd/webserver/main.go
-  ├─ webapp.LoadConfig(configs/webserver.yaml)
-  ├─ webapp.New(cfg)
-  │     ├─ SQLite 打开（glebarez/sqlite，WAL + busy_timeout，MaxOpenConns=1）
-  │     ├─ migrate()：执行内嵌 SQL（建表 + 种子 + 一次性订正）
-  │     ├─ PostgreSQL 打开（监控库，只读查询为主）
+  ├─ app.LoadConfig(configs/webserver.yaml)
+  ├─ app.New(cfg)
+  │     ├─ PostgreSQL 打开（权限库；连接池可配置，默认 20 连接 / 5 空闲 / 1800s）
+  │     ├─ migrate()：执行内嵌 SQL（建表 + 种子 + 自增序列校正）
+  │     ├─ PostgreSQL 打开（监控库，只读查询为主；与权限库同实例同库）
   │     ├─ InfluxDB 客户端
   │     ├─ eventHub（SSE）
   │     └─ routes()：装配路由与中间件
@@ -20,8 +20,8 @@ cmd/webserver/main.go
 
 | 数据源 | 用途 | 是否由本服务写入 |
 | --- | --- | --- |
-| SQLite `data/webserver.db` | 权限、菜单、字典、配置、公告、日志 | 是（唯一的写入库） |
-| PostgreSQL | `agents`/`alerts`/`service_probe_states`/`docker_container_states`/`maintenance_windows` | 否（Collector 写入，本服务只查） |
+| PostgreSQL（`sa_system_*` 表） | 权限、菜单、字典、配置、公告、日志 | 是（本服务写入） |
+| PostgreSQL（监控表） | `agents`/`alerts`/`service_probe_states`/`docker_container_states`/`maintenance_windows` | 否（Collector 写入，本服务只查） |
 | InfluxDB 2 | 指标曲线 | 否（Collector/Telegraf 写入，本服务只查） |
 
 ## 2. 内部分层（internal/webapp）
@@ -146,7 +146,7 @@ sa_system_menu（status=1，type∈{1,2,4}）
 
 ```powershell
 cd webserver
-go test ./...                 # 单测与集成测试（使用临时 SQLite，不依赖 PG/Influx）
+go test ./...                 # 单测与集成测试（每个用例建独立 PG schema 并在结束时回收；不依赖 Influx）
 go vet ./...
 gofmt -l ./api ./internal ./cmd   # 应无输出
 ```

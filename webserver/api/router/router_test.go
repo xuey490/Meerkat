@@ -6,14 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 
 	"github.com/company/monitor-webserver/api/middleware"
 	"github.com/company/monitor-webserver/api/router"
@@ -21,13 +18,52 @@ import (
 	"github.com/company/monitor-webserver/internal/app"
 	"github.com/company/monitor-webserver/internal/iploc"
 	"github.com/company/monitor-webserver/internal/logic"
+	"github.com/company/monitor-webserver/internal/loginguard"
 	"github.com/company/monitor-webserver/internal/model"
 	"github.com/company/monitor-webserver/internal/monitor"
 	"github.com/company/monitor-webserver/internal/permission"
 	"github.com/company/monitor-webserver/internal/service"
 	"github.com/company/monitor-webserver/internal/session"
+	"github.com/company/monitor-webserver/internal/testutil/pgtest"
 	"github.com/company/monitor-webserver/internal/util"
 )
+
+// TestMonitorAdminRoutesRegisteredWithoutDB 在不依赖数据库的前提下注册监控类路由。
+//
+// 目的：锁住「路由树不冲突」。gin 在同一个方法树里遇到同位置、不同名的通配符
+// （例如 /monitor/alerts/:id 与 /monitor/alerts/:ids 同属一个方法）会直接 panic，
+// 而这类问题编译期发现不了、只有真正注册路由时才暴露。
+// 本用例只做注册，不触达任何依赖（各 API 的服务字段可以为 nil）。
+func TestMonitorAdminRoutesRegisteredWithoutDB(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	group := engine.Group("/api/v1")
+	guard := func(string) gin.HandlerFunc {
+		return func(*gin.Context) {}
+	}
+	// 四个列表的批量清理接口与服务器采集数据清理接口都落在这几个控制器里。
+	v1.NewAlertRuleAPI(nil).Register(group, guard)
+	v1.NewRemoteAPI(nil).Register(group, guard)
+	v1.NewJobLogAPI(nil).Register(group, guard)
+	v1.NewMonitorAPI(nil, nil).Register(group, guard)
+
+	registered := make(map[string]bool, len(engine.Routes()))
+	for _, route := range engine.Routes() {
+		registered[route.Method+" "+route.Path] = true
+	}
+	expected := []string{
+		"DELETE /api/v1/monitor/alerts/:ids",
+		"DELETE /api/v1/monitor/audit/sessions/:ids",
+		"DELETE /api/v1/monitor/job-logs/:ids",
+		"DELETE /api/v1/monitor/rdp/sessions/:ids",
+		"DELETE /api/v1/monitor/agents/:id/metrics",
+	}
+	for _, route := range expected {
+		if !registered[route] {
+			t.Errorf("缺少路由 %s", route)
+		}
+	}
+}
 
 // testEnv 是集成测试的运行环境。
 type testEnv struct {
@@ -37,24 +73,17 @@ type testEnv struct {
 	db *gorm.DB
 }
 
-// newEnv 装配一套基于临时 SQLite 的完整路由（监控库同样指向 SQLite，仅用于验证路由接线）。
+// newEnv 装配一套基于独立 PostgreSQL schema 的完整路由。
+//
+// 权限库与监控库指向同一个 schema（本用例专属，结束后自动 DROP），
+// 表名靠前缀区分，与生产部署形态一致。
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	path := filepath.Join(t.TempDir(), "webserver.db")
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatalf("打开测试库失败: %v", err)
-	}
+	db := pgtest.Open(t)
 	if err := app.Migrate(db, ""); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
-	// Windows 下 SQLite 文件会保持占用，测试结束前显式关闭连接。
-	t.Cleanup(func() {
-		if sqlDB, err := db.DB(); err == nil {
-			_ = sqlDB.Close()
-		}
-	})
 	perms := permission.New(db)
 	// 测试环境不需要归属地查询与跨实例强退登记：前者用禁用态（直接返回兜底标签），
 	// 后者用无 Redis 的进程内实现。
@@ -62,7 +91,7 @@ func newEnv(t *testing.T) *testEnv {
 	sessionGuard := session.NewGuard(nil)
 	authService := service.NewAuthService(logic.NewAuthLogic(db), perms, service.TokenConfig{
 		Secret: "test-secret", AccessSeconds: 3600, RefreshDays: 1,
-	}, locator, sessionGuard)
+	}, locator, sessionGuard, loginguard.New(nil, loginguard.Options{}))
 	userLogic := logic.NewUserLogic(db)
 	roleLogic := logic.NewRoleLogic(db)
 	deptLogic := logic.NewDeptLogic(db)

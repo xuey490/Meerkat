@@ -136,7 +136,14 @@ func shouldRecord(c *gin.Context) bool {
 }
 
 // clientIP 提取客户端 IP，兼容反向代理场景。
+//
+// 优先复用防护中间件写入上下文的来源 IP，保证操作日志与限流、登录日志口径一致。
 func clientIP(c *gin.Context) string {
+	if value, ok := c.Get(util.ContextClientIPKey); ok {
+		if ip, ok := value.(string); ok && ip != "" {
+			return ip
+		}
+	}
 	if forwarded := c.GetHeader("X-Forwarded-For"); forwarded != "" {
 		if index := strings.IndexByte(forwarded, ','); index > 0 {
 			return strings.TrimSpace(forwarded[:index])

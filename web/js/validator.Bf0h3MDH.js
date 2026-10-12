@@ -1,0 +1,1 @@
+import{i as e}from"./use-size.CN13gfWB.js";var t=t=>[``,...e].includes(t);export{t};
