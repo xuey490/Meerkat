@@ -97,6 +97,11 @@ type Deps struct {
 func New(deps Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
+	// Gin 默认信任所有代理，c.ClientIP() 会直接采信 X-Forwarded-For / X-Real-IP，
+	// 这与 protection.trust_proxy_headers 的口径不一致：关闭代理头信任时，
+	// 任何绕开上下文、直接调用 c.ClientIP() 的地方仍会被伪造头欺骗。
+	// 这里统一改为不信任代理头，来源 IP 只由 Protection 中间件按配置解析并写入上下文。
+	_ = engine.SetTrustedProxies(nil)
 	engine.Use(gin.Recovery())
 	engine.Use(middleware.SecurityHeaders())
 	// 请求关联 ID：贯穿访问日志、操作日志与响应头，便于排查单次请求。
