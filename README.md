@@ -1,9 +1,8 @@
 # Meerkat服务器集群实时监控平台
-
+[![](https://www.phpframe.org/logo.png)](https://www.phpframe.org/logo.png)
 
 <div align="center">
 
-[![](https://www.phpframe.org/logo.png)](https://www.phpframe.org/logo.png)
 
   “meerkat”在中文中通常翻译为猫鼬或狐獴，属于獴科的一种小型食肉哺乳动物，原产于非洲南部,它们喜欢群居生活，跟小伙伴在一起的时候，总有一个专职“站岗放哨”的哨兵，发现危险后，通过不同频率组合的叫声传递超过20种信息，精准指示天敌类型(如鹰隼、狐狸)和方位，让其它小伙伴及时警觉危险。Meerkat服务器集群实时监控平台的寓意也是像狐獴一样，及早发现服务器的状态异常，及时预警。
 </div>
